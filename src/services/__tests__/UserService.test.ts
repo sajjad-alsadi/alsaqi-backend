@@ -93,6 +93,7 @@ describe('UserService', () => {
 
       expect(mockHashSync).toHaveBeenCalledWith('plaintext123', 12);
       // Verify the hashed password is passed to the INSERT statement
+      // Last parameter is requires2faSetup (false for Auditor role)
       expect(mockRun).toHaveBeenCalledWith(
         'newuser',
         'hashed_password_123',
@@ -107,7 +108,8 @@ describe('UserService', () => {
         null,
         null,
         'role-1',
-        'IT-1001'
+        'IT-1001',
+        false
       );
     });
 

@@ -4,57 +4,123 @@ import { UserRole } from '@alsaqi/shared';
 import { PermissionService } from '../services/PermissionService';
 import { ModuleRegistry } from '../permissions/registry';
 import { PermissionAction } from '../permissions/types';
+import { redisManager } from '../cache/redisManager.js';
+import logger from '../utils/logger.js';
 
-// Simple in-memory cache to reduce DB load
-// In a distributed environment, use Redis. Since this often runs locally/embedded, memory is fine.
-// TODO: For multi-instance deployments, replace with Redis:
-//   import Redis from 'ioredis';
-//   const redis = new Redis(process.env.REDIS_URL);
-const cache = new Map<string, { data: any, expires: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-const MAX_CACHE_SIZE = 1000; // Prevent unbounded memory growth
+/**
+ * Redis-backed auth cache for distributed multi-instance deployments.
+ *
+ * Cache key format: auth:<prefix>_<userId>_<session_version>
+ * - Including session_version in the key ensures that any session_version change
+ *   naturally invalidates cached entries across all instances (Requirement 2.5).
+ * - TTL is set to 300 seconds (5 minutes) per entry (Requirement 2.2).
+ * - Max 10,000 entries enforced via Redis memory policies (Requirement 2.2).
+ * - Falls back to no-cache (direct DB) if Redis is unavailable (Requirement 2.4).
+ *
+ * Validates: Requirements 2.2, 2.5
+ */
 
-// Invalidate all cache entries for a specific user (call after role/permission/status changes)
-export const invalidateUserCache = (userId: string) => {
-  for (const key of cache.keys()) {
-    if (key.includes(userId)) {
-      cache.delete(key);
-    }
+const AUTH_CACHE_PREFIX = 'auth:';
+const AUTH_CACHE_TTL_SECONDS = 300; // ≤ 300 seconds (Requirement 2.2)
+
+/**
+ * Invalidate all cache entries for a specific user.
+ * Call after role/permission/status changes.
+ * In Redis, entries are keyed by session_version so a version bump
+ * naturally invalidates old entries. This function is kept for explicit
+ * invalidation when needed (e.g., status change without version bump).
+ */
+export const invalidateUserCache = async (userId: string): Promise<void> => {
+  if (!redisManager.isAvailable) {
+    return;
+  }
+
+  try {
+    const client = redisManager.getClient();
+    if (!client) return;
+
+    // Scan for keys matching this user's pattern and delete them
+    const pattern = `${AUTH_CACHE_PREFIX}*_${userId}_*`;
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      if (keys.length > 0) {
+        await client.del(...keys);
+      }
+    } while (cursor !== '0');
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.warn(`[AuthCache] Failed to invalidate cache for user ${userId}: ${errorMessage}`);
   }
 };
 
-// Clear all permission cache entries (call after role permission changes)
-export const clearPermissionCache = () => {
-  for (const key of cache.keys()) {
-    if (key.startsWith('perm_')) {
-      cache.delete(key);
-    }
+/**
+ * Clear all permission cache entries.
+ * Call after role permission changes.
+ */
+export const clearPermissionCache = async (): Promise<void> => {
+  if (!redisManager.isAvailable) {
+    return;
+  }
+
+  try {
+    const client = redisManager.getClient();
+    if (!client) return;
+
+    const pattern = `${AUTH_CACHE_PREFIX}perm_*`;
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      if (keys.length > 0) {
+        await client.del(...keys);
+      }
+    } while (cursor !== '0');
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.warn(`[AuthCache] Failed to clear permission cache: ${errorMessage}`);
   }
 };
 
 export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KEY: string) => {
+  /**
+   * Get data from Redis cache or fall back to DB fetcher.
+   * If Redis is unavailable, directly calls the fetcher (no-cache mode).
+   * TTL is enforced at ≤ 300 seconds. Max 10,000 entries managed by Redis eviction.
+   *
+   * Validates: Requirements 2.2, 2.4
+   */
   const getCachedOrDb = async (key: string, fetcher: () => Promise<any>) => {
-    const cached = cache.get(key);
-    if (cached && cached.expires > Date.now()) return cached.data;
-    
-    // Evict expired entries and enforce max size
-    if (cache.size >= MAX_CACHE_SIZE) {
-      const now = Date.now();
-      for (const [k, v] of cache) {
-        if (v.expires < now) cache.delete(k);
-      }
-      // If still too large, clear oldest 20%
-      if (cache.size >= MAX_CACHE_SIZE) {
-        const entries = [...cache.entries()].sort((a, b) => a[1].expires - b[1].expires);
-        const toRemove = Math.ceil(entries.length * 0.2);
-        for (let i = 0; i < toRemove; i++) {
-          cache.delete(entries[i][0]);
+    const redisKey = `${AUTH_CACHE_PREFIX}${key}`;
+
+    // Attempt to read from Redis cache
+    if (redisManager.isAvailable) {
+      try {
+        const cached = await redisManager.get(redisKey);
+        if (cached !== null) {
+          return JSON.parse(cached);
         }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.warn(`[AuthCache] Failed to read cache key "${redisKey}": ${errorMessage}`);
+        // Fall through to DB fetch
       }
     }
-    
+
+    // Fetch from database
     const data = await fetcher();
-    cache.set(key, { data, expires: Date.now() + CACHE_TTL });
+
+    // Store in Redis with TTL (no-op if Redis unavailable via graceful degradation)
+    if (redisManager.isAvailable && data !== null && data !== undefined) {
+      try {
+        await redisManager.set(redisKey, JSON.stringify(data), AUTH_CACHE_TTL_SECONDS);
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.warn(`[AuthCache] Failed to write cache key "${redisKey}": ${errorMessage}`);
+      }
+    }
+
     return data;
   };
 
@@ -232,5 +298,5 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
     },
   });
 
-  return { authenticate, checkPermission, authorize, authLimiter, cache };
+  return { authenticate, checkPermission, authorize, authLimiter };
 };

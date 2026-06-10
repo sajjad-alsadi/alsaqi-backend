@@ -2,7 +2,14 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { db } from '../db/index';
+import { redisManager } from '../cache/redisManager';
 import { HealthStatus, SubsystemCheck } from '../types/api';
+import { createRequire } from 'module';
+
+// Read version from package.json at module load time
+const require = createRequire(import.meta.url);
+const packageJson = require('../../package.json');
+const APP_VERSION: string = packageJson.version || '1.0.0';
 
 /**
  * Cron status tracker.
@@ -76,6 +83,33 @@ async function checkDatabase(): Promise<SubsystemCheck> {
     details: {
       type: db.isExternal ? 'PostgreSQL' : 'PGlite',
     },
+  };
+}
+
+/**
+ * Check Redis connectivity by executing a PING command.
+ * Returns ok if Redis responds with PONG within 2000ms.
+ */
+async function checkRedis(): Promise<SubsystemCheck> {
+  const start = Date.now();
+  const pong = await redisManager.ping();
+
+  if (!pong) {
+    return {
+      status: 'fail',
+      latency: Date.now() - start,
+      details: {
+        reason: redisManager.isAvailable
+          ? 'PING did not return PONG'
+          : `Redis not available (status: ${redisManager.status})`,
+      },
+    };
+  }
+
+  return {
+    status: 'ok',
+    latency: Date.now() - start,
+    details: { connected: true },
   };
 }
 
@@ -224,19 +258,24 @@ async function checkCron(): Promise<SubsystemCheck> {
 
 /**
  * Derive overall health status from individual check results.
- * - "unhealthy" (503) if database fails
- * - "degraded" (200) if any non-database check fails
+ * - "unhealthy" (503) if any primary subsystem (database, redis) fails
+ * - "degraded" (200) if primary systems ok but any secondary (filesystem, websocket, memory, cron) fails
  * - "healthy" (200) if all pass
  */
-function deriveOverallStatus(checks: HealthStatus['checks']): HealthStatus['status'] {
-  if (checks.database.status !== 'ok') {
+export function deriveOverallStatus(checks: HealthStatus['checks']): HealthStatus['status'] {
+  // Primary subsystems: database and redis
+  const primaryChecks = [checks.database, checks.redis];
+  const anyPrimaryFailed = primaryChecks.some((c) => c.status !== 'ok');
+
+  if (anyPrimaryFailed) {
     return 'unhealthy';
   }
 
-  const nonDbChecks = [checks.filesystem, checks.memory, checks.websocket, checks.cron];
-  const anyNonDbFailed = nonDbChecks.some((c) => c.status !== 'ok');
+  // Secondary subsystems: filesystem, memory, websocket, cron
+  const secondaryChecks = [checks.filesystem, checks.memory, checks.websocket, checks.cron];
+  const anySecondaryFailed = secondaryChecks.some((c) => c.status !== 'ok');
 
-  if (anyNonDbFailed) {
+  if (anySecondaryFailed) {
     return 'degraded';
   }
 
@@ -259,15 +298,16 @@ export function createHealthRouter(): Router {
 
     const checksPromise = (async () => {
       // Run all checks in parallel with independent timeouts
-      const [database, filesystem, memory, websocket, cron] = await Promise.all([
+      const [database, redis, filesystem, memory, websocket, cron] = await Promise.all([
         withTimeout(checkDatabase),
+        withTimeout(checkRedis),
         withTimeout(checkFilesystem),
         withTimeout(checkMemory),
         withTimeout(() => checkWebSocket(req)),
         withTimeout(checkCron),
       ]);
 
-      return { database, filesystem, memory, websocket, cron };
+      return { database, redis, filesystem, memory, websocket, cron };
     })();
 
     // Race between checks completing and overall timeout
@@ -276,6 +316,7 @@ export function createHealthRouter(): Router {
     // If overall timeout hit, return partial results
     const finalChecks: HealthStatus['checks'] = checks || {
       database: { status: 'timeout', latency: OVERALL_TIMEOUT_MS, details: { reason: 'Overall timeout' } },
+      redis: { status: 'timeout', latency: OVERALL_TIMEOUT_MS, details: { reason: 'Overall timeout' } },
       filesystem: { status: 'timeout', latency: OVERALL_TIMEOUT_MS, details: { reason: 'Overall timeout' } },
       memory: { status: 'timeout', latency: OVERALL_TIMEOUT_MS, details: { reason: 'Overall timeout' } },
       websocket: { status: 'timeout', latency: OVERALL_TIMEOUT_MS, details: { reason: 'Overall timeout' } },
@@ -289,7 +330,7 @@ export function createHealthRouter(): Router {
       status,
       checks: finalChecks,
       uptime: process.uptime(),
-      version: '1.0',
+      version: APP_VERSION,
     };
 
     res.status(httpStatus).json(response);

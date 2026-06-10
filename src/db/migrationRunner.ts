@@ -9,6 +9,7 @@ export interface Migration {
   name: string;             // Human-readable description
   type: 'schema' | 'seed'; // DDL or data
   up: () => Promise<void>;  // Forward migration
+  down?: () => Promise<void>; // Rollback migration (optional)
 }
 
 /**
@@ -109,5 +110,53 @@ export class MigrationRunner {
     }
 
     logger.info(`All ${pending.length} migration(s) applied successfully`);
+  }
+
+  /**
+   * Rolls back a specific migration by version.
+   *
+   * - Finds the migration by version in the available list
+   * - Rejects with clear error if no down() is defined (Requirement 3.7)
+   * - Executes down() within a single transaction (Requirement 3.6)
+   * - Removes the record from schema_migrations within the same transaction (Requirement 3.6)
+   * - On failure, rolls back all changes automatically (Requirement 3.2)
+   */
+  async rollback(version: string, available: Migration[]): Promise<void> {
+    const migration = available.find(m => m.version === version);
+
+    if (!migration) {
+      throw new Error(
+        `Migration version "${version}" not found in available migrations`
+      );
+    }
+
+    if (!migration.down) {
+      const errorMessage =
+        `Rollback is not supported for migration ${migration.version}: "${migration.name}" — no down() function defined`;
+      logger.error(errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    logger.info(`Rolling back migration ${migration.version}: ${migration.name} (${migration.type})`);
+
+    try {
+      await this.db.transaction(async () => {
+        // Execute the migration's down function
+        await migration.down!();
+
+        // Remove the record from schema_migrations
+        await this.db.prepare(
+          'DELETE FROM schema_migrations WHERE version = ?'
+        ).run(migration.version);
+      });
+      logger.info(`Migration ${migration.version} rolled back successfully`);
+    } catch (error: any) {
+      logger.error(`Rollback of migration ${migration.version} failed: ${error.message}`, {
+        version: migration.version,
+        name: migration.name,
+        error: error.message,
+      });
+      throw error;
+    }
   }
 }

@@ -4,4 +4,7 @@ uploads/
 tmp/
 data/keys/
 .env
+!.env.example
+!.env.production.example
 *.log
+logs/

@@ -4,13 +4,13 @@ import logger from '../utils/logger.js';
 
 /**
  * Maximum number of concurrent Puppeteer browser instances.
- * Requirement 10.1
+ * Requirement 13.1, 7.6: Max 3 concurrent browser instances.
  */
 const MAX_POOL_SIZE = 3;
 
 /**
  * Number of pages a browser instance may render before being recycled.
- * Requirement 10.2
+ * Requirement 13.5: Recycle browser after 50 pages processed.
  */
 const MAX_PAGES_PER_INSTANCE = 50;
 
@@ -27,22 +27,39 @@ const ACQUIRE_TIMEOUT_MS = 30_000;
 const DISPOSE_TIMEOUT_MS = 10_000;
 
 /**
- * Tracks per-browser metadata (render count).
+ * Custom error thrown when a browser crashes while processing a job.
+ * Callers (e.g., pdfWorker) can catch this to trigger job re-queuing.
+ * Requirement 13.4: On browser crash → re-queue affected job.
+ */
+export class BrowserCrashedError extends Error {
+  constructor(message = 'Browser instance crashed during job processing') {
+    super(message);
+    this.name = 'BrowserCrashedError';
+  }
+}
+
+/**
+ * Tracks per-browser metadata (render count, crash state).
  */
 interface BrowserMeta {
+  /** Number of pages rendered by this browser instance */
   renderCount: number;
+  /** Set to true when the browser disconnects unexpectedly (crash) */
+  crashed: boolean;
 }
 
 /**
  * BrowserPool — Manages a pool of Puppeteer browser instances.
  *
  * Features:
- * - Max 3 concurrent instances (Req 10.1)
- * - Recycles instances after 50 page renders (Req 10.2)
+ * - Max 3 concurrent instances (Req 13.1, 7.6)
+ * - Recycles instances after 50 page renders (Req 13.5)
  * - Lazy initialization on first acquire (Req 10.3)
  * - dispose() closes all browsers within 10s (Req 10.4)
  * - Queues requests when all busy, timeout after 30s (Req 10.6)
- * - Handles crashed/unresponsive instances (Req 10.7)
+ * - Crash recovery: removes crashed instance, creates replacement,
+ *   signals caller to re-queue the affected job (Req 13.4)
+ * - Docker-safe launch args: --no-sandbox, --disable-gpu, --disable-dev-shm-usage (Req 13.1, 7.6)
  */
 export class BrowserPool {
   private pool: Pool<Browser> | null = null;
@@ -72,11 +89,15 @@ export class BrowserPool {
             ],
           });
 
-          // Handle unexpected disconnection (Req 10.7)
+          // Handle unexpected disconnection / crash (Req 13.4)
           browser.on('disconnected', () => {
-            logger.warn('[BrowserPool] Browser disconnected unexpectedly');
+            logger.warn('[BrowserPool] Browser crashed/disconnected unexpectedly — removing from pool and creating replacement');
+            const meta = this.meta.get(browser);
+            if (meta) {
+              meta.crashed = true;
+            }
             this.meta.delete(browser);
-            // Attempt to destroy from pool (best-effort)
+            // Remove from pool so a new instance will be created on next acquire
             if (this.pool) {
               this.pool.destroy(browser).catch(() => {
                 // Already disconnected, ignore
@@ -84,7 +105,7 @@ export class BrowserPool {
             }
           });
 
-          this.meta.set(browser, { renderCount: 0 });
+          this.meta.set(browser, { renderCount: 0, crashed: false });
           return browser;
         },
 
@@ -107,7 +128,7 @@ export class BrowserPool {
               return false;
             }
 
-            // Check render count — recycle if exceeded (Req 10.2)
+            // Check render count — recycle if exceeded (Req 13.5)
             const meta = this.meta.get(browser);
             if (meta && meta.renderCount >= MAX_PAGES_PER_INSTANCE) {
               logger.info(
@@ -161,7 +182,7 @@ export class BrowserPool {
     try {
       const browser = await pool.acquire();
 
-      // Double-check connectivity after acquiring (Req 10.7)
+      // Double-check connectivity after acquiring (Req 13.4)
       if (!browser.connected) {
         logger.warn('[BrowserPool] Acquired browser is not connected, destroying and retrying');
         await pool.destroy(browser);
@@ -185,7 +206,10 @@ export class BrowserPool {
    * Releases a browser instance back to the pool.
    *
    * Increments the render count. If the instance has exceeded
-   * MAX_PAGES_PER_INSTANCE, it will be recycled on next validation (Req 10.2).
+   * MAX_PAGES_PER_INSTANCE, it will be recycled on next validation (Req 13.5).
+   *
+   * If the browser has crashed/disconnected, it is destroyed and a
+   * BrowserCrashedError is thrown so callers can re-queue the affected job (Req 13.4).
    */
   async release(browser: Browser): Promise<void> {
     if (!this.pool) return;
@@ -195,15 +219,27 @@ export class BrowserPool {
       meta.renderCount++;
     }
 
-    // If the browser has disconnected while we held it, destroy instead of release
+    // If the browser has disconnected/crashed while we held it, destroy instead of release
+    // and throw BrowserCrashedError so the caller can re-queue the job (Req 13.4)
     if (!browser.connected) {
-      logger.warn('[BrowserPool] Releasing disconnected browser — destroying instead');
+      logger.warn('[BrowserPool] Releasing crashed/disconnected browser — destroying and signalling crash recovery');
       this.meta.delete(browser);
       await this.pool.destroy(browser).catch(() => {});
-      return;
+      throw new BrowserCrashedError(
+        'Browser instance crashed during job processing. The affected job should be re-queued.'
+      );
     }
 
     await this.pool.release(browser);
+  }
+
+  /**
+   * Checks whether a browser instance has crashed.
+   * Can be called before release to detect mid-job crashes.
+   * Requirement 13.4
+   */
+  isCrashed(browser: Browser): boolean {
+    return !browser.connected;
   }
 
   /**
@@ -276,6 +312,20 @@ export class BrowserPool {
    */
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  /**
+   * Returns the maximum pool size (for external reference).
+   */
+  get maxSize(): number {
+    return MAX_POOL_SIZE;
+  }
+
+  /**
+   * Returns the max pages per instance before recycling (for external reference).
+   */
+  get maxPagesPerInstance(): number {
+    return MAX_PAGES_PER_INSTANCE;
   }
 }
 

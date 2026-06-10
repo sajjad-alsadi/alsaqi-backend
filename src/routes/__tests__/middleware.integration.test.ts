@@ -62,6 +62,34 @@ vi.mock('express-rate-limit', () => ({
   }),
 }));
 
+// Mock Redis manager - returns unavailable so tests use no-cache mode (graceful degradation)
+vi.mock('../../cache/redisManager.js', () => ({
+  redisManager: {
+    isAvailable: false,
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue(false),
+    del: vi.fn().mockResolvedValue(false),
+    getClient: vi.fn().mockReturnValue(null),
+  },
+  default: {
+    isAvailable: false,
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue(false),
+    del: vi.fn().mockResolvedValue(false),
+    getClient: vi.fn().mockReturnValue(null),
+  },
+}));
+
+// Mock logger
+vi.mock('../../utils/logger.js', () => ({
+  default: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
 // Mock ModuleRegistry to return module definitions for test modules
 vi.mock('../../permissions/registry', () => ({
   ModuleRegistry: {
@@ -103,7 +131,6 @@ describe('Middleware Integration Tests', () => {
     };
 
     middlewares = createAuthMiddlewares(db, JWT_SECRET, JWT_PUBLIC_KEY);
-    middlewares.cache.clear();
   });
 
   function createApp() {
@@ -164,7 +191,6 @@ describe('Middleware Integration Tests', () => {
 
       // Recreate middlewares with updated db mock
       middlewares = createAuthMiddlewares(db, JWT_SECRET, JWT_PUBLIC_KEY);
-      middlewares.cache.clear();
 
       const app = createApp();
       app.get('/api/test', middlewares.authenticate, (req: any, res) => {
@@ -198,7 +224,6 @@ describe('Middleware Integration Tests', () => {
       });
 
       middlewares = createAuthMiddlewares(db, JWT_SECRET, JWT_PUBLIC_KEY);
-      middlewares.cache.clear();
 
       const app = createApp();
       app.get('/api/test', middlewares.authenticate, (req: any, res) => {
@@ -232,7 +257,6 @@ describe('Middleware Integration Tests', () => {
       });
 
       middlewares = createAuthMiddlewares(db, JWT_SECRET, JWT_PUBLIC_KEY);
-      middlewares.cache.clear();
 
       const app = createApp();
       app.get('/api/test', middlewares.authenticate, (req: any, res) => {
@@ -268,7 +292,6 @@ describe('Middleware Integration Tests', () => {
       });
 
       middlewares = createAuthMiddlewares(db, JWT_SECRET, JWT_PUBLIC_KEY);
-      middlewares.cache.clear();
 
       const app = createApp();
       app.get('/api/dashboard', middlewares.authenticate, (req: any, res) => {
@@ -322,7 +345,6 @@ describe('Middleware Integration Tests', () => {
       mockHasPermission.mockResolvedValue(false);
 
       middlewares = createAuthMiddlewares(db, JWT_SECRET, JWT_PUBLIC_KEY);
-      middlewares.cache.clear();
 
       const app = createAppWithPermission('Finding', 'Delete');
 

@@ -1,320 +1,498 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fc from 'fast-check';
-import * as fs from 'fs';
-import * as path from 'path';
+import { MigrationRunner, Migration, MigrationRecord } from '../migrationRunner';
 
 /**
- * Property Test: Migration DDL uses IF NOT EXISTS (Property 1)
+ * Property-Based Tests for the Migration System
  *
- * **Validates: Requirements 2.4**
+ * Property 4: Migration Atomicity
+ * Property 5: Migration Audit Trail
+ * Property 6: Migration Rollback Round-Trip
  *
- * For any table creation statement in the migration definitions, the SQL must
- * include `IF NOT EXISTS` to prevent errors on re-execution and ensure
- * idempotent schema creation.
+ * **Validates: Requirements 3.1, 3.2, 3.4, 3.5**
+ *
+ * Strategy: We use an in-memory simulation of the IDBWrapper that faithfully
+ * replicates transaction semantics (BEGIN/COMMIT/ROLLBACK). The MigrationRunner
+ * under test is the IDBWrapper-based one at src/db/migrationRunner.ts.
+ *
+ * This approach allows us to verify the correctness properties without needing
+ * a real database, while still testing that the MigrationRunner correctly uses
+ * transactions to ensure atomicity, audit trails, and rollback round-trips.
  */
-describe('Property 1: Migration DDL uses IF NOT EXISTS', () => {
-  // Read the migrations source file to extract all SQL statements
-  const tsPath = path.resolve(__dirname, '..', 'migrations.ts');
-  const jsPath = path.resolve(__dirname, '..', 'migrations.js');
-  const migrationsFilePath = fs.existsSync(tsPath) ? tsPath : jsPath;
-  const migrationsSource = fs.readFileSync(migrationsFilePath, 'utf-8');
 
-  // Extract all CREATE TABLE statements from the source
-  const createTableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/gi;
-  const createTableStatements: string[] = [];
-  let match: RegExpExecArray | null;
+// ─── Mock logger ─────────────────────────────────────────────────────────────
 
-  while ((match = createTableRegex.exec(migrationsSource)) !== null) {
-    createTableStatements.push(match[0]);
-  }
+vi.mock('../../utils/logger', () => ({
+  default: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
 
-  // Extract all DROP TABLE statements from the source
-  const dropTableRegex = /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)/gi;
-  const dropTableStatements: string[] = [];
+// ─── In-memory DB simulation with real transaction semantics ─────────────────
 
-  while ((match = dropTableRegex.exec(migrationsSource)) !== null) {
-    dropTableStatements.push(match[0]);
-  }
+interface InMemoryRow {
+  version: string;
+  name: string;
+  type: string;
+  applied_at: string;
+}
 
-  it('should have found CREATE TABLE statements in migrations file', () => {
-    expect(createTableStatements.length).toBeGreaterThan(0);
-  });
+/**
+ * Creates a mock IDBWrapper that simulates real transaction behavior:
+ * - Tracks schema_migrations table rows in memory
+ * - Supports BEGIN/COMMIT/ROLLBACK semantics within transaction()
+ * - If any operation inside transaction() throws, all changes are rolled back
+ */
+function createInMemoryDb() {
+  const rows: InMemoryRow[] = [];
+  // Track DDL operations (table creations) performed by migrations
+  const tables: Set<string> = new Set();
 
-  it('every CREATE TABLE statement includes IF NOT EXISTS', () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 0, max: createTableStatements.length - 1 }),
-        (index) => {
-          const statement = createTableStatements[index];
-          // Every CREATE TABLE must include IF NOT EXISTS
-          const hasIfNotExists = /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS/i.test(statement);
-          expect(hasIfNotExists).toBe(true);
+  // Pending changes within a transaction (for rollback support)
+  let txPendingInserts: InMemoryRow[] = [];
+  let txPendingDeletes: string[] = []; // versions to delete
+  let txPendingTables: string[] = [];
+  let inTransaction = false;
+
+  const mockDb: any = {
+    exec: vi.fn(async (sql: string) => {
+      // CREATE TABLE IF NOT EXISTS schema_migrations - always succeeds
+      if (sql.includes('CREATE TABLE IF NOT EXISTS schema_migrations')) {
+        tables.add('schema_migrations');
+      }
+    }),
+
+    prepare: vi.fn((sql: string) => {
+      return {
+        get: vi.fn(async (...params: any[]) => {
+          return undefined;
+        }),
+        all: vi.fn(async (...params: any[]) => {
+          if (sql.includes('SELECT') && sql.includes('schema_migrations')) {
+            // Return current committed rows
+            return [...rows];
+          }
+          return [];
+        }),
+        run: vi.fn(async (...params: any[]) => {
+          if (sql.includes('INSERT INTO schema_migrations')) {
+            const newRow: InMemoryRow = {
+              version: params[0],
+              name: params[1],
+              type: params[2],
+              applied_at: new Date().toISOString(),
+            };
+            if (inTransaction) {
+              txPendingInserts.push(newRow);
+            } else {
+              rows.push(newRow);
+            }
+          } else if (sql.includes('DELETE FROM schema_migrations')) {
+            const version = params[0];
+            if (inTransaction) {
+              txPendingDeletes.push(version);
+            } else {
+              const idx = rows.findIndex(r => r.version === version);
+              if (idx !== -1) rows.splice(idx, 1);
+            }
+          }
+          return { lastInsertRowid: 0, changes: 1 };
+        }),
+      };
+    }),
+
+    transaction: vi.fn(async (fn: () => Promise<any>) => {
+      // Simulate real transaction semantics:
+      // - Begin: mark we're in a transaction
+      // - Execute fn: all inserts/deletes go to pending buffers
+      // - Commit: apply pending changes to main store
+      // - Rollback: discard pending changes on error
+      inTransaction = true;
+      txPendingInserts = [];
+      txPendingDeletes = [];
+      txPendingTables = [];
+
+      try {
+        const result = await fn();
+        // COMMIT: apply pending changes
+        for (const row of txPendingInserts) {
+          rows.push(row);
         }
-      ),
-      { numRuns: Math.max(100, createTableStatements.length * 3) }
-    );
+        for (const version of txPendingDeletes) {
+          const idx = rows.findIndex(r => r.version === version);
+          if (idx !== -1) rows.splice(idx, 1);
+        }
+        for (const table of txPendingTables) {
+          tables.add(table);
+        }
+        return result;
+      } catch (error) {
+        // ROLLBACK: discard all pending changes (they're just not applied)
+        // Nothing needs to be undone since we only apply on commit
+        throw error;
+      } finally {
+        inTransaction = false;
+        txPendingInserts = [];
+        txPendingDeletes = [];
+        txPendingTables = [];
+      }
+    }),
+
+    // Expose internal state for assertions
+    _getRows: () => [...rows],
+    _getTables: () => new Set(tables),
+    _addTable: (name: string) => { tables.add(name); },
+    _reset: () => {
+      rows.length = 0;
+      tables.clear();
+      inTransaction = false;
+      txPendingInserts = [];
+      txPendingDeletes = [];
+      txPendingTables = [];
+    },
+  };
+
+  return mockDb;
+}
+
+// ─── Arbitraries (generators) ────────────────────────────────────────────────
+
+/** Generate a valid migration version string (e.g., '001', '042', '999') */
+const arbVersion = fc.integer({ min: 1, max: 999 }).map(n => String(n).padStart(3, '0'));
+
+/** Generate a valid migration name (alphanumeric with underscores) */
+const arbMigrationName = fc.stringMatching(/^[a-z][a-z0-9_]{2,30}$/);
+
+/** Generate a migration type */
+const arbMigrationType = fc.constantFrom('schema', 'seed') as fc.Arbitrary<'schema' | 'seed'>;
+
+// ─── Property Tests ──────────────────────────────────────────────────────────
+
+describe('Property 4: Migration Atomicity', () => {
+  /**
+   * **Validates: Requirements 3.1, 3.2**
+   *
+   * For ANY migration that fails (throws an exception during execution),
+   * the DB state must be unchanged:
+   * - The migration is NOT recorded in schema_migrations
+   * - The transaction is rolled back
+   */
+
+  let mockDb: ReturnType<typeof createInMemoryDb>;
+  let runner: MigrationRunner;
+
+  beforeEach(() => {
+    mockDb = createInMemoryDb();
+    runner = new MigrationRunner(mockDb);
   });
 
-  it('no DROP TABLE statements exist in migrations', () => {
-    expect(dropTableStatements).toHaveLength(0);
-  });
+  it('for ANY migration that throws, no record is added to schema_migrations', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        arbVersion,
+        arbMigrationName,
+        arbMigrationType,
+        // Generate an arbitrary error message
+        fc.string({ minLength: 1, maxLength: 100 }),
+        async (version, name, type, errorMessage) => {
+          mockDb._reset();
+          await runner.initialize();
 
-  it('all CREATE TABLE statements use IF NOT EXISTS pattern (exhaustive check)', () => {
-    // Verify every single CREATE TABLE statement, not just random samples
-    for (const statement of createTableStatements) {
-      const hasIfNotExists = /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS/i.test(statement);
-      expect(hasIfNotExists).toBe(true);
-    }
-  });
+          // Take snapshot of state before attempting the migration
+          const rowsBefore = mockDb._getRows();
+          expect(rowsBefore).toHaveLength(0);
 
-  it('generated table names produce valid IF NOT EXISTS DDL pattern', () => {
-    // Property: For any valid table name, the expected DDL pattern should
-    // always include IF NOT EXISTS
-    fc.assert(
-      fc.property(
-        fc.stringMatching(/^[a-z][a-z0-9_]{2,30}$/),
-        (tableName) => {
-          // Simulate what the migration system should produce for any table
-          const expectedDDL = `CREATE TABLE IF NOT EXISTS ${tableName}`;
-          
-          // Verify the pattern includes IF NOT EXISTS
-          expect(expectedDDL).toMatch(/CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+\w+/i);
-          
-          // Verify it does NOT match a destructive DROP TABLE pattern
-          expect(expectedDDL).not.toMatch(/DROP\s+TABLE/i);
+          // Create a migration that WILL FAIL
+          const failingMigration: Migration = {
+            version,
+            name,
+            type,
+            up: async () => {
+              throw new Error(errorMessage);
+            },
+          };
+
+          // Attempt to run the failing migration
+          await expect(runner.run([failingMigration])).rejects.toThrow();
+
+          // PROPERTY: schema_migrations must be unchanged (no record added)
+          const rowsAfter = mockDb._getRows();
+          expect(rowsAfter).toHaveLength(0);
+
+          // The failed migration must NOT appear in the records
+          const hasVersion = rowsAfter.some(r => r.version === version);
+          expect(hasVersion).toBe(false);
         }
       ),
       { numRuns: 100 }
     );
-  });
+  }, 60_000);
 
-  it('no migration SQL contains DROP TABLE followed by CREATE TABLE (destructive pattern)', () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 0, max: Math.max(0, createTableStatements.length - 1) }),
-        (index) => {
-          const statement = createTableStatements[index];
-          // Extract the table name from the CREATE TABLE statement
-          const tableNameMatch = statement.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
-          if (tableNameMatch) {
-            const tableName = tableNameMatch[1];
-            // Verify there's no DROP TABLE for this same table name in the source
-            const dropPattern = new RegExp(`DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${tableName}`, 'i');
-            expect(migrationsSource).not.toMatch(dropPattern);
+  it('for ANY batch where migration N fails, migrations N+1..end are never executed and prior state is preserved', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Generate 2-5 migrations, one of which will fail
+        fc.integer({ min: 2, max: 5 }),
+        fc.integer({ min: 0, max: 4 }).map(n => Math.min(n, 3)), // fail index (clamped)
+        arbMigrationName,
+        async (totalCount, failIndexRaw, baseName) => {
+          mockDb._reset();
+          await runner.initialize();
+
+          const failIndex = Math.min(failIndexRaw, totalCount - 1);
+          const executedVersions: string[] = [];
+
+          const migrations: Migration[] = Array.from({ length: totalCount }, (_, i) => ({
+            version: String(i + 1).padStart(3, '0'),
+            name: `${baseName}_${i}`,
+            type: 'schema' as const,
+            up: async () => {
+              if (i === failIndex) {
+                throw new Error(`Migration ${i} failed`);
+              }
+              executedVersions.push(String(i + 1).padStart(3, '0'));
+            },
+          }));
+
+          await expect(runner.run(migrations)).rejects.toThrow();
+
+          // PROPERTY: Only migrations before failIndex should be recorded
+          const rowsAfter = mockDb._getRows();
+          expect(rowsAfter).toHaveLength(failIndex);
+
+          // The failing migration itself must NOT be recorded
+          const failVersion = String(failIndex + 1).padStart(3, '0');
+          expect(rowsAfter.some(r => r.version === failVersion)).toBe(false);
+
+          // Migrations after the failing one must NOT have been executed
+          for (let i = failIndex + 1; i < totalCount; i++) {
+            const v = String(i + 1).padStart(3, '0');
+            expect(executedVersions).not.toContain(v);
+            expect(rowsAfter.some(r => r.version === v)).toBe(false);
           }
         }
       ),
-      { numRuns: Math.max(100, createTableStatements.length * 3) }
+      { numRuns: 50 }
     );
-  });
+  }, 60_000);
 });
 
+describe('Property 5: Migration Audit Trail', () => {
+  /**
+   * **Validates: Requirements 3.4, 3.5**
+   *
+   * For ANY migration that succeeds, it MUST appear in schema_migrations
+   * with version, name, type, and a valid timestamp (applied_at).
+   */
 
-/**
- * Property Test: Migration idempotence preserves data (Property 2)
- *
- * **Validates: Requirements 2.6**
- *
- * For any valid data inserted into `app_settings`, `pdf_settings`, or
- * `user_management_settings` tables, running the migration system again
- * must leave that data unchanged.
- *
- * Strategy: Extract the actual CREATE TABLE IF NOT EXISTS DDL from the
- * migrations source, execute them against an in-memory PGlite instance,
- * insert generated data, re-execute the DDL (simulating server restart),
- * and verify data is preserved.
- */
-describe('Property 2: Migration idempotence preserves data', () => {
-  let pglite: any;
+  let mockDb: ReturnType<typeof createInMemoryDb>;
+  let runner: MigrationRunner;
 
-  // Extract the actual DDL for the three settings tables from migrations source
-  const tsPath2 = path.resolve(__dirname, '..', 'migrations.ts');
-  const jsPath2 = path.resolve(__dirname, '..', 'migrations.js');
-  const migrationsFilePath = fs.existsSync(tsPath2) ? tsPath2 : jsPath2;
-  const migrationsSource = fs.readFileSync(migrationsFilePath, 'utf-8');
-
-  // Extract full CREATE TABLE statements for our target tables
-  function extractCreateTableDDL(tableName: string): string | null {
-    // Match CREATE TABLE IF NOT EXISTS <tableName> ( ... ) with balanced parens
-    const regex = new RegExp(
-      `CREATE\\s+TABLE\\s+IF\\s+NOT\\s+EXISTS\\s+${tableName}\\s*\\(`,
-      'i'
-    );
-    const match = regex.exec(migrationsSource);
-    if (!match) return null;
-
-    // Find the matching closing paren by counting depth
-    let depth = 1;
-    let i = match.index + match[0].length;
-    while (i < migrationsSource.length && depth > 0) {
-      if (migrationsSource[i] === '(') depth++;
-      if (migrationsSource[i] === ')') depth--;
-      i++;
-    }
-
-    return migrationsSource.substring(match.index, i);
-  }
-
-  const appSettingsDDL = extractCreateTableDDL('app_settings');
-  const pdfSettingsDDL = extractCreateTableDDL('pdf_settings');
-  const userMgmtSettingsDDL = extractCreateTableDDL('user_management_settings');
-
-  beforeAll(async () => {
-    const { PGlite } = await import('@electric-sql/pglite');
-    pglite = new PGlite();
-    await pglite.waitReady;
-
-    // Create the tables initially
-    if (appSettingsDDL) await pglite.query(appSettingsDDL);
-    if (pdfSettingsDDL) await pglite.query(pdfSettingsDDL);
-    if (userMgmtSettingsDDL) await pglite.query(userMgmtSettingsDDL);
+  beforeEach(() => {
+    mockDb = createInMemoryDb();
+    runner = new MigrationRunner(mockDb);
   });
 
-  afterAll(async () => {
-    if (pglite) {
-      await pglite.close();
-    }
-  });
-
-  it('should have extracted DDL for all three settings tables', () => {
-    expect(appSettingsDDL).not.toBeNull();
-    expect(pdfSettingsDDL).not.toBeNull();
-    expect(userMgmtSettingsDDL).not.toBeNull();
-  });
-
-  it('data in app_settings, pdf_settings, and user_management_settings is preserved after re-running CREATE TABLE IF NOT EXISTS', async () => {
-    // Define fast-check arbitraries for each settings table
-    const appSettingsArb = fc.record({
-      app_name: fc.string({ minLength: 1, maxLength: 50 }),
-      app_version: fc.stringMatching(/^[0-9]+\.[0-9]+\.[0-9]+$/),
-      app_description: fc.string({ minLength: 0, maxLength: 100 }),
-      company_name: fc.string({ minLength: 1, maxLength: 50 }),
-      system_owner: fc.string({ minLength: 1, maxLength: 50 }),
-      developer_name: fc.string({ minLength: 1, maxLength: 50 }),
-      support_email: fc.emailAddress(),
-      app_status: fc.constantFrom('Active', 'Inactive', 'Maintenance'),
-    });
-
-    const pdfSettingsArb = fc.record({
-      arabic_font_name: fc.constantFrom('Simplified Arabic', 'Traditional Arabic', 'Tahoma'),
-      arabic_font_size: fc.integer({ min: 8, max: 72 }),
-      heading_font_size: fc.integer({ min: 10, max: 72 }),
-      subheading_font_size: fc.integer({ min: 8, max: 72 }),
-      table_font_size: fc.integer({ min: 8, max: 72 }),
-      rtl_enabled: fc.constantFrom(0, 1),
-      margin_top: fc.integer({ min: 0, max: 100 }),
-      margin_right: fc.integer({ min: 0, max: 100 }),
-      margin_bottom: fc.integer({ min: 0, max: 100 }),
-      margin_left: fc.integer({ min: 0, max: 100 }),
-      logo_position: fc.constantFrom('left', 'right', 'center'),
-      show_page_number: fc.constantFrom(0, 1),
-    });
-
-    const userMgmtSettingsArb = fc.record({
-      failed_login_threshold: fc.integer({ min: 1, max: 10 }),
-      inactive_account_threshold_days: fc.integer({ min: 30, max: 365 }),
-      password_min_length: fc.integer({ min: 6, max: 32 }),
-      password_require_uppercase: fc.constantFrom(0, 1),
-      password_require_lowercase: fc.constantFrom(0, 1),
-      password_require_numbers: fc.constantFrom(0, 1),
-      password_require_symbols: fc.constantFrom(0, 1),
-      password_expiry_days: fc.integer({ min: 30, max: 365 }),
-      enforce_single_session: fc.constantFrom(0, 1),
-      session_timeout_minutes: fc.integer({ min: 5, max: 480 }),
-      bulk_import_enabled: fc.constantFrom(0, 1),
-      admin_approval_required: fc.constantFrom(0, 1),
-    });
-
+  it('for ANY successful migration, a record with version, name, type, and valid timestamp is stored', async () => {
     await fc.assert(
       fc.asyncProperty(
-        appSettingsArb,
-        pdfSettingsArb,
-        userMgmtSettingsArb,
-        async (appSettings, pdfSettings, userMgmtSettings) => {
-          // Clear existing data for this iteration
-          await pglite.query('DELETE FROM app_settings');
-          await pglite.query('DELETE FROM pdf_settings');
-          await pglite.query('DELETE FROM user_management_settings');
+        arbVersion,
+        arbMigrationName,
+        arbMigrationType,
+        async (version, name, type) => {
+          mockDb._reset();
+          await runner.initialize();
 
-          // Insert generated data into app_settings
-          await pglite.query(
-            `INSERT INTO app_settings (id, app_name, app_version, app_description, company_name, system_owner, developer_name, support_email, app_status)
-             VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)`,
-            [
-              appSettings.app_name,
-              appSettings.app_version,
-              appSettings.app_description,
-              appSettings.company_name,
-              appSettings.system_owner,
-              appSettings.developer_name,
-              appSettings.support_email,
-              appSettings.app_status,
-            ]
-          );
+          const migration: Migration = {
+            version,
+            name,
+            type,
+            up: async () => {
+              // Successful migration (no-op)
+            },
+          };
 
-          // Insert generated data into pdf_settings
-          await pglite.query(
-            `INSERT INTO pdf_settings (id, arabic_font_name, arabic_font_size, heading_font_size, subheading_font_size, table_font_size, rtl_enabled, margin_top, margin_right, margin_bottom, margin_left, logo_position, show_page_number)
-             VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-            [
-              pdfSettings.arabic_font_name,
-              pdfSettings.arabic_font_size,
-              pdfSettings.heading_font_size,
-              pdfSettings.subheading_font_size,
-              pdfSettings.table_font_size,
-              pdfSettings.rtl_enabled,
-              pdfSettings.margin_top,
-              pdfSettings.margin_right,
-              pdfSettings.margin_bottom,
-              pdfSettings.margin_left,
-              pdfSettings.logo_position,
-              pdfSettings.show_page_number,
-            ]
-          );
+          await runner.run([migration]);
 
-          // Insert generated data into user_management_settings
-          await pglite.query(
-            `INSERT INTO user_management_settings (id, failed_login_threshold, inactive_account_threshold_days, password_min_length, password_require_uppercase, password_require_lowercase, password_require_numbers, password_require_symbols, password_expiry_days, enforce_single_session, session_timeout_minutes, bulk_import_enabled, admin_approval_required)
-             VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-            [
-              userMgmtSettings.failed_login_threshold,
-              userMgmtSettings.inactive_account_threshold_days,
-              userMgmtSettings.password_min_length,
-              userMgmtSettings.password_require_uppercase,
-              userMgmtSettings.password_require_lowercase,
-              userMgmtSettings.password_require_numbers,
-              userMgmtSettings.password_require_symbols,
-              userMgmtSettings.password_expiry_days,
-              userMgmtSettings.enforce_single_session,
-              userMgmtSettings.session_timeout_minutes,
-              userMgmtSettings.bulk_import_enabled,
-              userMgmtSettings.admin_approval_required,
-            ]
-          );
+          // PROPERTY: The migration must be recorded in schema_migrations
+          const rows = mockDb._getRows();
+          expect(rows).toHaveLength(1);
 
-          // Snapshot data before re-running migrations
-          const appBefore = (await pglite.query('SELECT * FROM app_settings WHERE id = 1')).rows[0];
-          const pdfBefore = (await pglite.query('SELECT * FROM pdf_settings WHERE id = 1')).rows[0];
-          const userMgmtBefore = (await pglite.query('SELECT * FROM user_management_settings WHERE id = 1')).rows[0];
-
-          // Re-run the CREATE TABLE IF NOT EXISTS DDL (simulating server restart migration)
-          await pglite.query(appSettingsDDL!);
-          await pglite.query(pdfSettingsDDL!);
-          await pglite.query(userMgmtSettingsDDL!);
-
-          // Snapshot data after re-running migrations
-          const appAfter = (await pglite.query('SELECT * FROM app_settings WHERE id = 1')).rows[0];
-          const pdfAfter = (await pglite.query('SELECT * FROM pdf_settings WHERE id = 1')).rows[0];
-          const userMgmtAfter = (await pglite.query('SELECT * FROM user_management_settings WHERE id = 1')).rows[0];
-
-          // Verify data is unchanged
-          expect(appAfter).toEqual(appBefore);
-          expect(pdfAfter).toEqual(pdfBefore);
-          expect(userMgmtAfter).toEqual(userMgmtBefore);
+          const record = rows[0];
+          // Must have correct version
+          expect(record.version).toBe(version);
+          // Must have correct name
+          expect(record.name).toBe(name);
+          // Must have correct type
+          expect(record.type).toBe(type);
+          // Must have a valid ISO timestamp
+          expect(record.applied_at).toBeDefined();
+          const parsedDate = new Date(record.applied_at);
+          expect(parsedDate.getTime()).not.toBeNaN();
+          // Timestamp should be recent (within last 10 seconds)
+          expect(Date.now() - parsedDate.getTime()).toBeLessThan(10_000);
         }
       ),
       { numRuns: 100 }
     );
-  }, 120000); // 2 minute timeout for 100 iterations with PGlite
+  }, 60_000);
+
+  it('for ANY batch of successful migrations, ALL are recorded with correct metadata', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Generate 1-5 unique migrations
+        fc.integer({ min: 1, max: 5 }),
+        arbMigrationName,
+        arbMigrationType,
+        async (count, baseName, type) => {
+          mockDb._reset();
+          await runner.initialize();
+
+          const migrations: Migration[] = Array.from({ length: count }, (_, i) => ({
+            version: String(i + 1).padStart(3, '0'),
+            name: `${baseName}_${i}`,
+            type,
+            up: async () => {},
+          }));
+
+          await runner.run(migrations);
+
+          // PROPERTY: All migrations must be recorded
+          const rows = mockDb._getRows();
+          expect(rows).toHaveLength(count);
+
+          // Each migration must have correct audit trail fields
+          for (let i = 0; i < count; i++) {
+            const expectedVersion = String(i + 1).padStart(3, '0');
+            const record = rows.find(r => r.version === expectedVersion);
+            expect(record).toBeDefined();
+            expect(record!.name).toBe(`${baseName}_${i}`);
+            expect(record!.type).toBe(type);
+            expect(record!.applied_at).toBeDefined();
+            expect(new Date(record!.applied_at).getTime()).not.toBeNaN();
+          }
+        }
+      ),
+      { numRuns: 50 }
+    );
+  }, 60_000);
+});
+
+describe('Property 6: Migration Rollback Round-Trip', () => {
+  /**
+   * **Validates: Requirements 3.5, 3.2**
+   *
+   * For ANY migration that has a down() function, applying the migration
+   * and then rolling it back must leave no trace in schema_migrations.
+   * The round-trip (apply → rollback) restores the original state.
+   */
+
+  let mockDb: ReturnType<typeof createInMemoryDb>;
+  let runner: MigrationRunner;
+
+  beforeEach(() => {
+    mockDb = createInMemoryDb();
+    runner = new MigrationRunner(mockDb);
+  });
+
+  it('for ANY migration with down(), apply then rollback leaves no trace in schema_migrations', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        arbVersion,
+        arbMigrationName,
+        arbMigrationType,
+        async (version, name, type) => {
+          mockDb._reset();
+          await runner.initialize();
+
+          // Take snapshot before
+          const rowsBefore = mockDb._getRows();
+          expect(rowsBefore).toHaveLength(0);
+
+          // Create a migration with both up() and down()
+          const migration: Migration = {
+            version,
+            name,
+            type,
+            up: async () => {
+              // Simulate creating a table
+            },
+            down: async () => {
+              // Simulate dropping the table
+            },
+          };
+
+          // Apply the migration
+          await runner.run([migration]);
+
+          // Verify it was recorded
+          const rowsAfterApply = mockDb._getRows();
+          expect(rowsAfterApply).toHaveLength(1);
+          expect(rowsAfterApply[0].version).toBe(version);
+
+          // Rollback the migration
+          await runner.rollback(version, [migration]);
+
+          // PROPERTY: After rollback, schema_migrations must be empty (original state)
+          const rowsAfterRollback = mockDb._getRows();
+          expect(rowsAfterRollback).toHaveLength(0);
+
+          // The version must no longer appear
+          expect(rowsAfterRollback.some(r => r.version === version)).toBe(false);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  }, 60_000);
+
+  it('for ANY sequence of migrations with down(), apply all then rollback last restores N-1 state', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Generate 2-4 migrations all with down()
+        fc.integer({ min: 2, max: 4 }),
+        arbMigrationName,
+        async (count, baseName) => {
+          mockDb._reset();
+          await runner.initialize();
+
+          const migrations: Migration[] = Array.from({ length: count }, (_, i) => ({
+            version: String(i + 1).padStart(3, '0'),
+            name: `${baseName}_${i}`,
+            type: 'schema' as const,
+            up: async () => {},
+            down: async () => {},
+          }));
+
+          // Apply all migrations
+          await runner.run(migrations);
+
+          // Verify all are recorded
+          const rowsAfterApply = mockDb._getRows();
+          expect(rowsAfterApply).toHaveLength(count);
+
+          // Rollback the last migration
+          const lastVersion = String(count).padStart(3, '0');
+          await runner.rollback(lastVersion, migrations);
+
+          // PROPERTY: After rollback, only N-1 migrations remain
+          const rowsAfterRollback = mockDb._getRows();
+          expect(rowsAfterRollback).toHaveLength(count - 1);
+
+          // The rolled-back version must not be present
+          expect(rowsAfterRollback.some(r => r.version === lastVersion)).toBe(false);
+
+          // All other versions must still be present
+          for (let i = 0; i < count - 1; i++) {
+            const v = String(i + 1).padStart(3, '0');
+            expect(rowsAfterRollback.some(r => r.version === v)).toBe(true);
+          }
+        }
+      ),
+      { numRuns: 50 }
+    );
+  }, 60_000);
 });

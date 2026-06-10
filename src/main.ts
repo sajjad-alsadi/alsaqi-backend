@@ -6,8 +6,20 @@
  */
 
 import 'dotenv/config';
+import { validateEnvironmentOnStartup } from './config/envValidator.js';
+import { waitForDependencies } from './startup/dependencyCheck.js';
 import { createApiServer } from './index.js';
 import type { ApiServerConfig } from './index.js';
+
+// ─── Environment Validation (must run before any other initialization) ────────
+// Validates all required env vars, exits with FATAL in production if invalid.
+const envValidation = validateEnvironmentOnStartup();
+if (!envValidation.isValid && process.env.NODE_ENV === 'production') {
+  // Process will exit via validateEnvironmentOnStartup, but we stop execution here
+  // to prevent any further initialization from running.
+  // The exit is handled inside validateEnvironmentOnStartup with a guaranteed <5s exit.
+  await new Promise(() => {}); // Block forever; process.exit() will terminate us
+}
 
 // ─── Environment Variable Parsing ────────────────────────────────────────────
 
@@ -67,6 +79,25 @@ const config: ApiServerConfig = {
   uploadDir: getOptionalEnv('UPLOAD_DIR', './uploads'),
   nodeEnv,
 };
+
+// ─── Dependency Readiness Check (Production Only) ────────────────────────────
+// Verify PostgreSQL and Redis are ready before accepting HTTP requests.
+// Wait up to 30 seconds with 5-second retry intervals. Exit(1) if not ready.
+// Requirements: 7.3, 7.4
+
+if (nodeEnv === 'production') {
+  const databaseUrl = config.databaseUrl;
+  const redisUrl = process.env.REDIS_URL || '';
+
+  if (databaseUrl && redisUrl) {
+    await waitForDependencies({
+      databaseUrl,
+      redisUrl,
+      timeoutMs: 30_000,
+      retryIntervalMs: 5_000,
+    });
+  }
+}
 
 // ─── Start Server ────────────────────────────────────────────────────────────
 

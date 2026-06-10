@@ -1,0 +1,10 @@
+
+ RUN  v4.1.8 C:/Users/sajjad.abdulbaqi/Documents/GitHub/alsaqi-backend/alsaqi-backend
+
+Sourcemap for "C:/Users/sajjad.abdulbaqi/Documents/GitHub/alsaqi-backend/alsaqi-backend/node_modules/node-cron/dist/esm/node-cron.js" points to missing source files
+
+ Test Files  108 passed (108)
+      Tests  1758 passed (1758)
+   Start at  04:59:49
+   Duration  24.07s (transform 9.87s, setup 0ms, import 38.16s, tests 77.07s, environment 18ms)
+

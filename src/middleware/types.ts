@@ -26,6 +26,19 @@ export interface RequestLoggerOptions {
 }
 
 /**
+ * Configuration for per-endpoint custom rate limits.
+ * Requirement 8.3: Support per-endpoint custom limits.
+ */
+export interface EndpointRateLimitConfig {
+  /** Route pattern to match (e.g., '/api/v1/pdf-templates/preview-pdf') */
+  pattern: string;
+  /** Max requests allowed in the window */
+  maxRequests: number;
+  /** Window duration in seconds */
+  windowSeconds: number;
+}
+
+/**
  * Options for the per-user rate limiter middleware.
  */
 export interface RateLimiterOptions {
@@ -35,6 +48,8 @@ export interface RateLimiterOptions {
   unauthenticatedLimit?: number;
   /** Sliding window duration in seconds (default: 60) */
   windowSeconds?: number;
+  /** Per-endpoint custom rate limits (overrides default limits for specific routes) */
+  endpointLimits?: EndpointRateLimitConfig[];
 }
 
 /**

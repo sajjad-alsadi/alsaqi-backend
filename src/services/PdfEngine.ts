@@ -1,5 +1,5 @@
 import Handlebars from 'handlebars';
-import { browserPool } from './BrowserPool.js';
+import { browserPool, BrowserCrashedError } from './BrowserPool.js';
 import { wrapWithStyles, sanitizeHtml } from './pdfHelpers.js';
 import { FALLBACK_TEMPLATES, buildFallbackHtml } from '../constants/fallbackTemplates.js';
 import logger from '../utils/logger.js';
@@ -315,7 +315,17 @@ export class PdfEngine {
           // Page may already be closed if browser crashed
         }
       }
-      await browserPool.release(browser);
+      try {
+        await browserPool.release(browser);
+      } catch (releaseErr) {
+        // If release throws BrowserCrashedError, the browser was already destroyed.
+        // Log and continue — the pool will create a replacement on next acquire.
+        if (releaseErr instanceof BrowserCrashedError) {
+          logger.warn('[PdfEngine] Browser crashed during release — pool will create replacement on next acquire');
+        } else {
+          throw releaseErr;
+        }
+      }
     }
   }
 

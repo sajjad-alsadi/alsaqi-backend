@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  ci:
+    name: Typecheck, Test & Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        node-version: [20]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Security audit
+        run: |
+          echo "Running npm audit for high and critical vulnerabilities..."
+          npm audit --audit-level=high --omit=dev 2>&1 | tee audit-output.txt
+          AUDIT_EXIT_CODE=${PIPESTATUS[0]}
+          if [ $AUDIT_EXIT_CODE -ne 0 ]; then
+            echo ""
+            echo "=========================================="
+            echo "❌ npm audit FAILED - Vulnerabilities Found"
+            echo "=========================================="
+            echo ""
+            echo "Affected packages with high/critical severity:"
+            echo ""
+            npm audit --audit-level=high --omit=dev --json 2>/dev/null | \
+              node -e "
+                const input = require('fs').readFileSync('/dev/stdin', 'utf8');
+                try {
+                  const data = JSON.parse(input);
+                  const vulns = data.vulnerabilities || {};
+                  const affected = [];
+                  for (const [pkg, info] of Object.entries(vulns)) {
+                    if (info.severity === 'high' || info.severity === 'critical') {
+                      affected.push({ package: pkg, severity: info.severity, via: (info.via || []).map(v => typeof v === 'string' ? v : v.title || v.name || '').filter(Boolean).join(', ') });
+                    }
+                  }
+                  if (affected.length > 0) {
+                    console.log('| Package | Severity | Details |');
+                    console.log('|---------|----------|---------|');
+                    affected.forEach(a => console.log('| ' + a.package + ' | ' + a.severity.toUpperCase() + ' | ' + a.via + ' |'));
+                  } else {
+                    console.log('No high/critical vulnerabilities in direct output, but audit exited with non-zero code.');
+                    console.log('Check the full audit output above for details.');
+                  }
+                } catch (e) {
+                  console.log('Could not parse audit JSON. See full output above.');
+                }
+              " || true
+            echo ""
+            echo "Full audit output is available above."
+            exit 1
+          else
+            echo "✅ No high or critical vulnerabilities found."
+          fi
+
+      - name: Secret detection (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

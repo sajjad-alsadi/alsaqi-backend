@@ -1,0 +1,76 @@
+# Gitleaks configuration for alsaqi-backend
+# Detects: API keys, tokens, passwords in plain text, and private keys
+# Reference: https://github.com/gitleaks/gitleaks
+
+title = "alsaqi-backend secret detection"
+
+[extend]
+# Extend the default gitleaks rules (includes common patterns for AWS, GCP, GitHub tokens, etc.)
+useDefault = true
+
+# Custom rules for project-specific patterns
+
+[[rules]]
+id = "generic-api-key-assignment"
+description = "Detects hardcoded API key assignments"
+regex = '''(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][a-zA-Z0-9_\-]{16,}['"]'''
+keywords = ["api_key", "apikey", "api-key"]
+
+[[rules]]
+id = "generic-secret-assignment"
+description = "Detects hardcoded secret assignments"
+regex = '''(?i)(secret|secret[_-]?key)\s*[:=]\s*['"][a-zA-Z0-9_\-/+=]{16,}['"]'''
+keywords = ["secret"]
+
+[[rules]]
+id = "generic-password-assignment"
+description = "Detects hardcoded password assignments"
+regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"][^\s'"]{8,}['"]'''
+keywords = ["password", "passwd", "pwd"]
+
+[[rules]]
+id = "generic-token-assignment"
+description = "Detects hardcoded token assignments"
+regex = '''(?i)(token|auth[_-]?token|access[_-]?token|bearer)\s*[:=]\s*['"][a-zA-Z0-9_\-/.]{16,}['"]'''
+keywords = ["token", "auth_token", "access_token", "bearer"]
+
+[[rules]]
+id = "private-key-block"
+description = "Detects private key content (PEM format)"
+regex = '''-----BEGIN\s+(RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE KEY-----'''
+keywords = ["PRIVATE KEY"]
+
+[[rules]]
+id = "jwt-secret-hardcoded"
+description = "Detects hardcoded JWT secrets"
+regex = '''(?i)(jwt[_-]?secret|jwt[_-]?key)\s*[:=]\s*['"][a-zA-Z0-9_\-/+=]{16,}['"]'''
+keywords = ["jwt_secret", "jwt-secret", "jwt_key"]
+
+[[rules]]
+id = "database-url-with-password"
+description = "Detects database connection strings with embedded passwords"
+regex = '''(?i)(postgres|postgresql|mysql|mongodb)://[^:]+:[^@\s]{8,}@[^\s]+'''
+keywords = ["postgres://", "postgresql://", "mysql://", "mongodb://"]
+
+[[rules]]
+id = "redis-url-with-password"
+description = "Detects Redis connection strings with embedded passwords"
+regex = '''(?i)redis://:[^@\s]{8,}@[^\s]+'''
+keywords = ["redis://"]
+
+# Allowlist - paths and patterns that are safe to ignore
+[allowlist]
+description = "Global allowlist"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.production\.example$''',
+  '''\.gitleaks\.toml$''',
+  '''package-lock\.json$''',
+  '''node_modules/''',
+  '''dist/''',
+  '''\.kiro/''',
+  '''data/keys/\.rsa_keys\.enc$''',
+  '''.*\.test\.ts$''',
+  '''.*\.spec\.ts$''',
+  '''.*\.property\.test\.ts$''',
+]

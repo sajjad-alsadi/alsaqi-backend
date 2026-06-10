@@ -4,16 +4,17 @@ import express from 'express';
 import request from 'supertest';
 
 /**
- * Unit Tests - Enhanced Health Check Endpoint (Task 17.1)
+ * Unit Tests - Enhanced Health Check Endpoint (Task 14.1)
  *
  * Tests the comprehensive health check that verifies:
- * - Database connectivity
+ * - Database connectivity (primary)
+ * - Redis connectivity via PING (primary)
  * - Filesystem (uploads dir writable + ≥100MB free)
  * - Memory (< 90% heap)
  * - WebSocket server (accepting connections)
  * - Cron status (last run within expected interval)
  *
- * Validates: Requirements 15.1, 15.2, 15.3, 15.4, 15.5, 15.6, 15.7
+ * Validates: Requirements 15.1, 15.2, 15.3, 15.4, 15.5
  */
 
 // Mock the database module
@@ -26,6 +27,15 @@ vi.mock('../../db/index', () => ({
       all: vi.fn().mockResolvedValue([]),
       run: vi.fn().mockResolvedValue({ changes: 0 }),
     })),
+  },
+}));
+
+// Mock the Redis manager module
+vi.mock('../../cache/redisManager', () => ({
+  redisManager: {
+    ping: vi.fn().mockResolvedValue(true),
+    isAvailable: true,
+    status: 'connected',
   },
 }));
 
@@ -78,14 +88,13 @@ function createTestApp(withWss = true) {
   return app;
 }
 
-describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
+describe('Enhanced Health Check Endpoint (Task 14.1)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  describe('Requirement 15.1: Subsystem checks', () => {
-    it('should check all five subsystems', async () => {
-      // Mark cron as recently run
+  describe('Requirement 15.1: Subsystem checks with status and latency', () => {
+    it('should check all six subsystems including redis', async () => {
       updateCronLastRun();
 
       const app = createTestApp();
@@ -94,18 +103,34 @@ describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
       expect(res.status).toBe(200);
       expect(res.body.checks).toBeDefined();
       expect(res.body.checks.database).toBeDefined();
+      expect(res.body.checks.redis).toBeDefined();
       expect(res.body.checks.filesystem).toBeDefined();
       expect(res.body.checks.memory).toBeDefined();
       expect(res.body.checks.websocket).toBeDefined();
       expect(res.body.checks.cron).toBeDefined();
     });
 
-    it('should include latency for each subsystem', async () => {
+    it('should include status (ok/fail/timeout) for each subsystem', async () => {
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      const validStatuses = ['ok', 'fail', 'timeout'];
+      expect(validStatuses).toContain(res.body.checks.database.status);
+      expect(validStatuses).toContain(res.body.checks.redis.status);
+      expect(validStatuses).toContain(res.body.checks.filesystem.status);
+      expect(validStatuses).toContain(res.body.checks.memory.status);
+      expect(validStatuses).toContain(res.body.checks.websocket.status);
+      expect(validStatuses).toContain(res.body.checks.cron.status);
+    });
+
+    it('should include latency in ms for each subsystem', async () => {
       updateCronLastRun();
       const app = createTestApp();
       const res = await request(app).get('/health');
 
       expect(res.body.checks.database.latency).toBeTypeOf('number');
+      expect(res.body.checks.redis.latency).toBeTypeOf('number');
       expect(res.body.checks.filesystem.latency).toBeTypeOf('number');
       expect(res.body.checks.memory.latency).toBeTypeOf('number');
       expect(res.body.checks.websocket.latency).toBeTypeOf('number');
@@ -113,22 +138,8 @@ describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
     });
   });
 
-  describe('Requirement 15.2: Healthy status when all pass', () => {
-    it('should return "healthy" with 200 when all checks pass', async () => {
-      updateCronLastRun();
-      const app = createTestApp();
-      const res = await request(app).get('/health');
-
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe('healthy');
-      expect(res.body.checks.database.status).toBe('ok');
-      expect(res.body.checks.memory.status).toBe('ok');
-      expect(res.body.checks.websocket.status).toBe('ok');
-    });
-  });
-
-  describe('Requirement 15.3: Unhealthy when DB fails', () => {
-    it('should return "unhealthy" with 503 when database check fails', async () => {
+  describe('Requirement 15.2: Unhealthy (503) when primary subsystem fails', () => {
+    it('should return unhealthy with 503 when database check fails', async () => {
       const { db } = await import('../../db/index');
       (db.prepare as any).mockReturnValueOnce({
         get: vi.fn().mockRejectedValue(new Error('Connection refused')),
@@ -142,10 +153,45 @@ describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
       expect(res.body.status).toBe('unhealthy');
       expect(res.body.checks.database.status).toBe('fail');
     });
+
+    it('should return unhealthy with 503 when redis check fails', async () => {
+      const { redisManager } = await import('../../cache/redisManager');
+      (redisManager.ping as any).mockResolvedValueOnce(false);
+      Object.defineProperty(redisManager, 'isAvailable', { value: false, configurable: true });
+      Object.defineProperty(redisManager, 'status', { value: 'degraded', configurable: true });
+
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      expect(res.status).toBe(503);
+      expect(res.body.status).toBe('unhealthy');
+      expect(res.body.checks.redis.status).toBe('fail');
+
+      // Restore redis mock
+      Object.defineProperty(redisManager, 'isAvailable', { value: true, configurable: true });
+      Object.defineProperty(redisManager, 'status', { value: 'connected', configurable: true });
+    });
+
+    it('should return unhealthy with 503 when database times out', async () => {
+      const { db } = await import('../../db/index');
+      (db.prepare as any).mockReturnValueOnce({
+        get: vi.fn().mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 5000))),
+      });
+
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      // DB should timeout → treated as primary failure → unhealthy
+      expect(res.status).toBe(503);
+      expect(res.body.status).toBe('unhealthy');
+      expect(res.body.checks.database.status).toBe('timeout');
+    }, 10000);
   });
 
-  describe('Requirement 15.4: Degraded when non-DB fails', () => {
-    it('should return "degraded" with 200 when WebSocket is not available', async () => {
+  describe('Requirement 15.3: Degraded (200) when primary ok but secondary fails', () => {
+    it('should return degraded with 200 when WebSocket is not available', async () => {
       updateCronLastRun();
       const app = createTestApp(false); // No WSS
       const res = await request(app).get('/health');
@@ -154,9 +200,40 @@ describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
       expect(res.body.status).toBe('degraded');
       expect(res.body.checks.websocket.status).toBe('fail');
     });
+
+    it('should return healthy with 200 when all subsystems pass', async () => {
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('healthy');
+      expect(res.body.checks.database.status).toBe('ok');
+      expect(res.body.checks.redis.status).toBe('ok');
+    });
   });
 
-  describe('Requirement 15.5: Independent 2-second timeout per check', () => {
+  describe('Requirement 15.4: Include uptime and version', () => {
+    it('should include uptime in seconds', async () => {
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      expect(res.body.uptime).toBeTypeOf('number');
+      expect(res.body.uptime).toBeGreaterThan(0);
+    });
+
+    it('should include version string from package.json', async () => {
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      expect(res.body.version).toBeTypeOf('string');
+      expect(res.body.version).toBe('1.0.0');
+    });
+  });
+
+  describe('Requirement 15.5: Overall response within 3000ms with partial results on timeout', () => {
     it('should timeout a slow database check without blocking others', async () => {
       const { db } = await import('../../db/index');
       // Make DB check hang for longer than 2s
@@ -173,10 +250,9 @@ describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
       // Other checks should still complete
       expect(res.body.checks.memory.status).toBe('ok');
       expect(res.body.checks.websocket.status).toBe('ok');
+      expect(res.body.checks.redis.status).toBe('ok');
     }, 10000);
-  });
 
-  describe('Requirement 15.6: Latency measurements', () => {
     it('should report latency even for failed checks', async () => {
       const { db } = await import('../../db/index');
       (db.prepare as any).mockReturnValueOnce({
@@ -192,43 +268,43 @@ describe('Enhanced Health Check Endpoint (Task 17.1)', () => {
     });
   });
 
-  describe('Requirement 15.7: Response within 3 seconds', () => {
-    it('should include uptime and version in response', async () => {
+  describe('Redis health check specifics', () => {
+    it('should report redis as ok when PING responds successfully', async () => {
       updateCronLastRun();
       const app = createTestApp();
       const res = await request(app).get('/health');
 
-      expect(res.body.uptime).toBeTypeOf('number');
-      expect(res.body.version).toBe('1.0');
+      expect(res.body.checks.redis.status).toBe('ok');
+      expect(res.body.checks.redis.latency).toBeTypeOf('number');
     });
 
-    it('should return HTTP 200 for healthy', async () => {
-      updateCronLastRun();
-      const app = createTestApp();
-      const res = await request(app).get('/health');
-
-      expect(res.status).toBe(200);
-    });
-
-    it('should return HTTP 200 for degraded', async () => {
-      updateCronLastRun();
-      const app = createTestApp(false);
-      const res = await request(app).get('/health');
-
-      expect(res.status).toBe(200);
-    });
-
-    it('should return HTTP 503 for unhealthy', async () => {
-      const { db } = await import('../../db/index');
-      (db.prepare as any).mockReturnValueOnce({
-        get: vi.fn().mockRejectedValue(new Error('DB down')),
-      });
+    it('should report redis as fail when ping returns false', async () => {
+      const { redisManager } = await import('../../cache/redisManager');
+      (redisManager.ping as any).mockResolvedValueOnce(false);
+      Object.defineProperty(redisManager, 'isAvailable', { value: false, configurable: true });
+      Object.defineProperty(redisManager, 'status', { value: 'degraded', configurable: true });
 
       updateCronLastRun();
       const app = createTestApp();
       const res = await request(app).get('/health');
 
-      expect(res.status).toBe(503);
+      expect(res.body.checks.redis.status).toBe('fail');
+      expect(res.body.checks.redis.latency).toBeGreaterThanOrEqual(0);
+
+      // Restore
+      Object.defineProperty(redisManager, 'isAvailable', { value: true, configurable: true });
+      Object.defineProperty(redisManager, 'status', { value: 'connected', configurable: true });
+    });
+
+    it('should report redis as fail when ping throws', async () => {
+      const { redisManager } = await import('../../cache/redisManager');
+      (redisManager.ping as any).mockRejectedValueOnce(new Error('Connection reset'));
+
+      updateCronLastRun();
+      const app = createTestApp();
+      const res = await request(app).get('/health');
+
+      expect(res.body.checks.redis.status).toBe('fail');
     });
   });
 

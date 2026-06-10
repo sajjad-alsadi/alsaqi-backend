@@ -104,7 +104,7 @@ const pdfSettingsArb: fc.Arbitrary<PdfSettings> = fc.record({
 /** Arbitrary for template data (Record<string, unknown>) */
 const dataArb = fc.record({
   auditTitle: fc.string({ minLength: 1, maxLength: 50 }),
-  auditDate: fc.date().map((d) => d.toISOString().slice(0, 10)),
+  auditDate: fc.integer({ min: 946684800000, max: 1924905600000 }).map((ts) => new Date(ts).toISOString().slice(0, 10)),
   auditorName: fc.string({ minLength: 1, maxLength: 30 }),
   departmentName: fc.string({ minLength: 1, maxLength: 30 }),
   findings: fc.array(
@@ -132,8 +132,8 @@ const pdfTemplateArb: fc.Arbitrary<PdfTemplate> = fc.record({
   version: fc.integer({ min: 1, max: 100 }),
   created_by: fc.string({ minLength: 1, maxLength: 20 }),
   updated_by: fc.string({ minLength: 1, maxLength: 20 }),
-  created_at: fc.date().map((d) => d.toISOString()),
-  updated_at: fc.date().map((d) => d.toISOString()),
+  created_at: fc.integer({ min: 946684800000, max: 1924905600000 }).map((ts) => new Date(ts).toISOString()),
+  updated_at: fc.integer({ min: 946684800000, max: 1924905600000 }).map((ts) => new Date(ts).toISOString()),
 });
 
 /** Arbitrary for RenderOptions WITH a template */

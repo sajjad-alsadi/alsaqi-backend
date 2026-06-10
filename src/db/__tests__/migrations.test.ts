@@ -295,3 +295,129 @@ describe('MigrationRunner', () => {
     });
   });
 });
+
+
+/**
+ * Unit tests for the MigrationRunner.rollback() method.
+ * Validates Requirements 3.2, 3.6, 3.7
+ */
+describe('MigrationRunner - rollback()', () => {
+  let mockDb: any;
+  let runner: MigrationRunner;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mockDb = {
+      exec: vi.fn().mockResolvedValue(undefined),
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockResolvedValue(undefined),
+        all: vi.fn().mockResolvedValue([]),
+        run: vi.fn().mockResolvedValue({ lastInsertRowid: 0, changes: 1 }),
+      }),
+      transaction: vi.fn(async (fn: Function) => fn()),
+    };
+
+    runner = new MigrationRunner(mockDb);
+  });
+
+  it('should reject rollback with clear error if migration has no down() defined (Req 3.7)', async () => {
+    const available: Migration[] = [
+      { version: '001', name: 'create_users', type: 'schema', up: async () => {} },
+    ];
+
+    await expect(runner.rollback('001', available)).rejects.toThrow(
+      'Rollback is not supported for migration 001'
+    );
+    await expect(runner.rollback('001', available)).rejects.toThrow(
+      'no down() function defined'
+    );
+  });
+
+  it('should reject rollback if migration version is not found', async () => {
+    const available: Migration[] = [
+      { version: '001', name: 'create_users', type: 'schema', up: async () => {} },
+    ];
+
+    await expect(runner.rollback('999', available)).rejects.toThrow(
+      'Migration version "999" not found'
+    );
+  });
+
+  it('should execute down() within a transaction (Req 3.6)', async () => {
+    const downFn = vi.fn().mockResolvedValue(undefined);
+    const available: Migration[] = [
+      { version: '001', name: 'create_users', type: 'schema', up: async () => {}, down: downFn },
+    ];
+
+    await runner.rollback('001', available);
+
+    // Transaction should be called once
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    // down() should be called inside the transaction
+    expect(downFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('should remove record from schema_migrations within the same transaction (Req 3.6)', async () => {
+    const mockRun = vi.fn().mockResolvedValue({ lastInsertRowid: 0, changes: 1 });
+    mockDb.prepare.mockReturnValue({
+      all: vi.fn().mockResolvedValue([]),
+      get: vi.fn(),
+      run: mockRun,
+    });
+
+    const available: Migration[] = [
+      { version: '001', name: 'create_users', type: 'schema', up: async () => {}, down: async () => {} },
+    ];
+
+    await runner.rollback('001', available);
+
+    // Verify DELETE FROM schema_migrations was called
+    const deleteCalls = mockDb.prepare.mock.calls.filter(
+      (call: any[]) => call[0]?.includes('DELETE FROM schema_migrations')
+    );
+    expect(deleteCalls.length).toBeGreaterThan(0);
+  });
+
+  it('should rollback transaction automatically on failure during down() (Req 3.2)', async () => {
+    // Make transaction propagate errors (simulating rollback behavior)
+    mockDb.transaction.mockImplementation(async (fn: Function) => {
+      try {
+        return await fn();
+      } catch (error) {
+        throw error; // transaction wrapper will have rolled back
+      }
+    });
+
+    const available: Migration[] = [
+      {
+        version: '001',
+        name: 'create_users',
+        type: 'schema',
+        up: async () => {},
+        down: async () => { throw new Error('Rollback down() failed'); },
+      },
+    ];
+
+    await expect(runner.rollback('001', available)).rejects.toThrow('Rollback down() failed');
+  });
+
+  it('should successfully rollback a migration with a valid down() function', async () => {
+    const downFn = vi.fn().mockResolvedValue(undefined);
+    const mockRun = vi.fn().mockResolvedValue({ lastInsertRowid: 0, changes: 1 });
+    mockDb.prepare.mockReturnValue({
+      all: vi.fn().mockResolvedValue([]),
+      get: vi.fn(),
+      run: mockRun,
+    });
+
+    const available: Migration[] = [
+      { version: '001', name: 'create_users', type: 'schema', up: async () => {}, down: downFn },
+    ];
+
+    await runner.rollback('001', available);
+
+    expect(downFn).toHaveBeenCalledTimes(1);
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+  });
+});

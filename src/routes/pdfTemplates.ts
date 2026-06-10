@@ -1,5 +1,6 @@
 import express from 'express';
 import { z } from 'zod';
+import { v4 as uuidv4 } from 'uuid';
 import { rateLimit } from 'express-rate-limit';
 import { PdfTemplateService } from '../services/PdfTemplateService';
 import { pdfEngine } from '../services/PdfEngine.js';
@@ -7,6 +8,8 @@ import { SettingsService } from '../services/SettingsService';
 import { mapRowToSettings } from '../types/pdf';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ValidationError } from '../utils/errors';
+import queueManager from '../queues/queueManager.js';
+import logger from '../utils/logger.js';
 import type { PdfSettings, PdfTemplate } from '../types/pdf';
 
 const templateSchema = z.object({
@@ -96,8 +99,13 @@ export const createPdfTemplatesRoutes = (
 
   /**
    * POST /pdf-templates/preview-pdf
-   * Generates a real PDF via Puppeteer and returns it as a downloadable blob.
-   * Requirements: 6.6, 9.4
+   * Enqueues a PDF generation job and returns 202 with job ID.
+   *
+   * Requirements:
+   * - 5.1: Return job ID within 500ms
+   * - 13.3: Process via queue system, respond immediately with HTTP 202 + job ID
+   *
+   * Falls back to inline rendering if the queue is not available.
    */
   router.post(`/pdf-templates/preview-pdf`, authenticate, previewRateLimiter, asyncHandler(async (req, res) => {
     const validation = previewSchema.safeParse(req.body);
@@ -106,15 +114,43 @@ export const createPdfTemplatesRoutes = (
     }
 
     const { content, sampleData } = validation.data;
+    const userId = (req as any).user?.id || 'anonymous';
 
-    // Fetch current PDF settings and convert to service-layer format
+    // Requirement 13.3: Process via queue system, respond with 202 + job ID
+    if (queueManager.isInitialized) {
+      const requestId = uuidv4();
+
+      try {
+        // Requirement 5.1: Enqueue and return job ID within 500ms
+        const jobId = await queueManager.addPdfJob({
+          requestId,
+          templateId: 'general', // Preview uses general template type
+          payload: { ...sampleData, __previewContent: content },
+          userId,
+        });
+
+        logger.info(`[PdfTemplates] PDF preview job enqueued. JobId: ${jobId}, RequestId: ${requestId}, UserId: ${userId}`);
+
+        // Requirement 5.1, 13.3: Return 202 Accepted with job ID
+        return res.status(202).json({
+          jobId,
+          requestId,
+          status: 'queued',
+          message: 'PDF generation job has been queued for processing.',
+        });
+      } catch (queueErr) {
+        // If queueing fails, log and fall back to inline rendering
+        logger.warn(
+          `[PdfTemplates] Failed to enqueue PDF job, falling back to inline rendering: ${queueErr instanceof Error ? queueErr.message : String(queueErr)}`
+        );
+      }
+    }
+
+    // Fallback: Inline rendering when queue is not available
     const rawSettings = await SettingsService.getPdfSettings();
     const settings: PdfSettings = mapRowToSettings(rawSettings as any);
-
-    // Determine language
     const language: 'ar' | 'en' = settings.rtl_enabled ? 'ar' : 'en';
 
-    // Create a temporary PdfTemplate object for rendering
     const tempTemplate: PdfTemplate = {
       id: 'preview',
       template_name: 'Preview',
@@ -129,7 +165,6 @@ export const createPdfTemplatesRoutes = (
       updated_at: new Date().toISOString(),
     };
 
-    // Render PDF via Puppeteer (30-second timeout handled internally by PdfEngine)
     const result = await pdfEngine.renderFromTemplate({
       template: tempTemplate,
       data: sampleData,
@@ -137,7 +172,6 @@ export const createPdfTemplatesRoutes = (
       language,
     });
 
-    // Return PDF as blob
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="preview.pdf"');
     res.setHeader('Content-Length', result.fileSize.toString());

@@ -2,11 +2,16 @@
  * Correlation ID middleware for the @alsaqi/api package.
  *
  * Generates or propagates a UUID v4 correlation ID on every request.
- * Sets it as a response header and attaches to the request context.
+ * Sets it as a response header, attaches to the request context,
+ * and stores in AsyncLocalStorage so all downstream logs include
+ * the correlation_id automatically.
+ *
+ * Requirements: 9.3
  */
 
 import { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { requestContext } from '../utils/logger.js';
 import type { CorrelationIdOptions } from './types.js';
 
 /**
@@ -53,7 +58,11 @@ export function createCorrelationIdMiddleware(options: CorrelationIdOptions = {}
     // Set response header
     res.setHeader(responseHeader, correlationId);
 
-    next();
+    // Run the rest of the request inside AsyncLocalStorage context
+    // so all downstream logs automatically include correlation_id
+    requestContext.run({ correlationId }, () => {
+      next();
+    });
   };
 }
 

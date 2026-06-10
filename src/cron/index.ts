@@ -7,6 +7,101 @@ import { backupScheduler } from '../utils/backup';
 import { updateCronLastRun } from '../routes/health';
 import { partitionManager } from '../services/PartitionManager';
 
+/** Maximum batch size for batch queries to avoid N+1 patterns (Requirement 14.3) */
+const BATCH_SIZE = 500;
+
+/**
+ * Process an array in batches of BATCH_SIZE, applying the given async function to each batch.
+ */
+async function processBatches<T, R>(items: T[], batchFn: (batch: T[]) => Promise<R[]>): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const batch = items.slice(i, i + BATCH_SIZE);
+    const batchResults = await batchFn(batch);
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+/**
+ * Resolve multiple user names/usernames to user IDs in a single batch query.
+ * Returns a Map from name/username to user ID.
+ */
+async function batchResolveUsersByName(names: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (names.length === 0) return result;
+
+  const uniqueNames = [...new Set(names.filter(Boolean))];
+  if (uniqueNames.length === 0) return result;
+
+  await processBatches(uniqueNames, async (batch) => {
+    const placeholders = batch.map((_, i) => `$${i + 1}`).join(', ');
+    const users = await db.prepare(
+      `SELECT id, name, username FROM users WHERE name IN (${placeholders}) OR username IN (${placeholders})`
+    ).all(...batch, ...batch) as Array<{ id: string; name: string; username: string }>;
+    
+    for (const user of users) {
+      if (user.name) result.set(user.name, user.id);
+      if (user.username) result.set(user.username, user.id);
+    }
+    return users;
+  });
+
+  return result;
+}
+
+/**
+ * Resolve multiple user names/usernames to user IDs in a single batch query (active users only).
+ * Returns a Map from name/username to user ID.
+ */
+async function batchResolveActiveUsersByName(names: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (names.length === 0) return result;
+
+  const uniqueNames = [...new Set(names.filter(Boolean))];
+  if (uniqueNames.length === 0) return result;
+
+  await processBatches(uniqueNames, async (batch) => {
+    const placeholders = batch.map((_, i) => `$${i + 1}`).join(', ');
+    const users = await db.prepare(
+      `SELECT id, name, username FROM users WHERE (name IN (${placeholders}) OR username IN (${placeholders})) AND status = 'active'`
+    ).all(...batch, ...batch) as Array<{ id: string; name: string; username: string }>;
+    
+    for (const user of users) {
+      if (user.name) result.set(user.name, user.id);
+      if (user.username) result.set(user.username, user.id);
+    }
+    return users;
+  });
+
+  return result;
+}
+
+/**
+ * Batch-fetch task assignments for multiple task IDs.
+ * Returns a Map from task_id to array of user_ids.
+ */
+async function batchGetTaskAssignments(taskIds: string[]): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  if (taskIds.length === 0) return result;
+
+  await processBatches(taskIds, async (batch) => {
+    const placeholders = batch.map((_, i) => `$${i + 1}`).join(', ');
+    const assignments = await db.prepare(
+      `SELECT task_id, user_id FROM task_assignments WHERE task_id IN (${placeholders})`
+    ).all(...batch) as Array<{ task_id: string; user_id: string }>;
+    
+    for (const assignment of assignments) {
+      const existing = result.get(assignment.task_id) || [];
+      existing.push(assignment.user_id);
+      result.set(assignment.task_id, existing);
+    }
+    return assignments;
+  });
+
+  return result;
+}
+
 export const startAutomationJobs = () => {
   logger.info('[CRON] Starting automation jobs...');
 
@@ -68,14 +163,19 @@ const runDailyAutomations = async () => {
       `);
       await updateStmt.run(todayStr);
 
-      // Notify lead auditors
+      // Batch-resolve lead auditor names to user IDs (avoid N+1)
+      const auditorNames = plansToUpdate
+        .map((p: any) => p.lead_auditor)
+        .filter(Boolean) as string[];
+      const auditorMap = await batchResolveUsersByName(auditorNames);
+
+      // Notify lead auditors using batch-resolved IDs
       for (const plan of plansToUpdate) {
         if (plan.lead_auditor) {
-          // Find user ID for lead auditor
-          const user = await db.prepare(`SELECT id FROM users WHERE name = ? OR username = ?`).get(plan.lead_auditor, plan.lead_auditor);
-          if (user) {
+          const userId = auditorMap.get(plan.lead_auditor);
+          if (userId) {
             await NotificationService.create(
-              user.id,
+              userId,
               'plan_started',
               `The audit plan "${plan.title}" has automatically started today.`,
               'info',
@@ -155,12 +255,18 @@ const runDailyAutomations = async () => {
     if (upcomingRecs && upcomingRecs.length > 0) {
       logger.info(`[CRON] Found ${upcomingRecs.length} recommendations due in 7 days.`);
       
+      // Batch-resolve responsible names to user IDs (avoid N+1)
+      const responsibleNames = upcomingRecs
+        .map((r: any) => r.responsible)
+        .filter(Boolean) as string[];
+      const responsibleMap = await batchResolveUsersByName(responsibleNames);
+
       for (const rec of upcomingRecs) {
         if (rec.responsible) {
-          const user = await db.prepare(`SELECT id FROM users WHERE name = ? OR username = ?`).get(rec.responsible, rec.responsible);
-          if (user) {
+          const userId = responsibleMap.get(rec.responsible);
+          if (userId) {
             await NotificationService.create(
-              user.id,
+              userId,
               'recommendation_due_soon',
               `A recommendation assigned to you is due in 7 days.`,
               'info',

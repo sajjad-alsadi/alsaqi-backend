@@ -101,6 +101,10 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
 
   // ─── Middleware Stack ─────────────────────────────────────────────────────────
 
+  // 0. Trust proxy - required for correct X-Forwarded-For IP extraction behind Load Balancer
+  //    Requirement 8.1: Extract real client IP from X-Forwarded-For
+  app.set('trust proxy', 1);
+
   // 1. Compression (before other middleware for optimal compression)
   app.use(createCompressionMiddleware());
 

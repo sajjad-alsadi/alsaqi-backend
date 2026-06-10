@@ -42,8 +42,8 @@ const pdfTemplateRowArb = (isDefault: number): fc.Arbitrary<PdfTemplateRow> =>
     version: fc.nat({ max: 1000 }),
     created_by: fc.string({ minLength: 1, maxLength: 50 }),
     updated_by: fc.string({ minLength: 1, maxLength: 50 }),
-    created_at: fc.date().map((d) => d.toISOString()),
-    updated_at: fc.date().map((d) => d.toISOString()),
+    created_at: fc.integer({ min: 946684800000, max: 1924905600000 }).map((ts) => new Date(ts).toISOString()),
+    updated_at: fc.integer({ min: 946684800000, max: 1924905600000 }).map((ts) => new Date(ts).toISOString()),
   });
 
 /** Generates an arbitrary PdfSettingsRow with controlled rtl_enabled and show_page_number */

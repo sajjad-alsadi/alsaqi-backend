@@ -9,7 +9,7 @@ export { createCorsMiddleware } from './cors.js';
 export type { CorsMiddlewareOptions } from './cors.js';
 export { csrfMiddleware, generateCsrfToken, attachCsrfToken } from './csrf.js';
 export type { CsrfOptions } from './csrf.js';
-export { createRateLimiter, resetRateLimiterStore, stopRateLimiterCleanup, getRateLimitCount } from './rateLimiter.js';
+export { createRateLimiter, resetRateLimiterStore, stopRateLimiterCleanup, getRateLimitCount, extractClientIp } from './rateLimiter.js';
 export { apiVersionMiddleware } from './apiVersion.js';
 export { createCorrelationIdMiddleware, correlationIdMiddleware, isValidUuid } from './correlationId.js';
 export { createResponseWrapper, responseWrapperMiddleware } from './responseWrapper.js';
@@ -35,3 +35,11 @@ export {
   MAX_BODY_SIZE,
 } from './validate.js';
 export type { FieldError, ValidateOptions } from './validate.js';
+export {
+  createCachingMiddleware,
+  cachingMiddleware,
+  staticCachingMiddleware,
+  listingCachingMiddleware,
+  generateETag,
+} from './caching.js';
+export type { CachingOptions, CacheResourceType } from './caching.js';

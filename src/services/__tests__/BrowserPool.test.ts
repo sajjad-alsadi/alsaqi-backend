@@ -38,7 +38,7 @@ vi.mock('puppeteer', () => ({
   },
 }));
 
-import { BrowserPool } from '../BrowserPool.js';
+import { BrowserPool, BrowserCrashedError } from '../BrowserPool.js';
 
 describe('BrowserPool', () => {
   let pool: BrowserPool;
@@ -94,13 +94,14 @@ describe('BrowserPool', () => {
     });
   });
 
-  describe('pool size limit (Req 10.1)', () => {
+  describe('pool size limit (Req 13.1, 7.6)', () => {
     it('should have max pool size of 3', async () => {
       const browsers = [];
       for (let i = 0; i < 3; i++) {
         browsers.push(await pool.acquire());
       }
       expect(pool.stats.borrowed).toBe(3);
+      expect(pool.maxSize).toBe(3);
 
       for (const b of browsers) {
         await pool.release(b);
@@ -108,7 +109,7 @@ describe('BrowserPool', () => {
     });
   });
 
-  describe('recycling after 50 renders (Req 10.2)', () => {
+  describe('recycling after 50 renders (Req 13.5)', () => {
     it('should track render count across acquire/release cycles', async () => {
       let browser = await pool.acquire();
       await pool.release(browser);
@@ -122,16 +123,60 @@ describe('BrowserPool', () => {
       await pool.release(browser);
       expect(pool.getRenderCount(browser)).toBe(3);
     });
+
+    it('should expose maxPagesPerInstance as 50', () => {
+      expect(pool.maxPagesPerInstance).toBe(50);
+    });
   });
 
-  describe('crashed instance handling (Req 10.7)', () => {
-    it('should destroy disconnected browser on release', async () => {
+  describe('crash recovery (Req 13.4)', () => {
+    it('should throw BrowserCrashedError on release of crashed browser', async () => {
       const browser = await pool.acquire();
       mockBrowserConnectedValue = false;
-      await pool.release(browser);
-      expect(pool.stats.borrowed).toBe(0);
+      await expect(pool.release(browser)).rejects.toThrow(BrowserCrashedError);
       // Restore so afterEach dispose works
       mockBrowserConnectedValue = true;
+    });
+
+    it('should remove crashed browser from pool', async () => {
+      const browser = await pool.acquire();
+      mockBrowserConnectedValue = false;
+      try {
+        await pool.release(browser);
+      } catch {
+        // Expected BrowserCrashedError
+      }
+      expect(pool.stats.borrowed).toBe(0);
+      mockBrowserConnectedValue = true;
+    });
+
+    it('should detect crash via isCrashed method', async () => {
+      const browser = await pool.acquire();
+      expect(pool.isCrashed(browser)).toBe(false);
+      mockBrowserConnectedValue = false;
+      expect(pool.isCrashed(browser)).toBe(true);
+      // Clean up
+      try { await pool.release(browser); } catch {}
+      mockBrowserConnectedValue = true;
+    });
+
+    it('BrowserCrashedError should have correct name', () => {
+      const err = new BrowserCrashedError();
+      expect(err.name).toBe('BrowserCrashedError');
+      expect(err instanceof Error).toBe(true);
+    });
+
+    it('should allow acquiring a new browser after crash recovery', async () => {
+      const browser = await pool.acquire();
+      mockBrowserConnectedValue = false;
+      try { await pool.release(browser); } catch {}
+      mockBrowserConnectedValue = true;
+
+      // Pool should create a new instance on next acquire
+      const newBrowser = await pool.acquire();
+      expect(newBrowser).toBeDefined();
+      expect(newBrowser.connected).toBe(true);
+      await pool.release(newBrowser);
     });
   });
 

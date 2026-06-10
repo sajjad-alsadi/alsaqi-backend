@@ -74,6 +74,7 @@ export interface HealthStatus {
   status: 'healthy' | 'degraded' | 'unhealthy';
   checks: {
     database: SubsystemCheck;
+    redis: SubsystemCheck;
     filesystem: SubsystemCheck;
     memory: SubsystemCheck;
     websocket: SubsystemCheck;

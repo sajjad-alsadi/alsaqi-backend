@@ -1,0 +1,75 @@
+# docker-compose.yml - Local development and production orchestration
+# Requirement 7.2: application (port 3000), PostgreSQL (port 5432), Redis (port 6379)
+# within a single internal bridge network, passing environment variables via .env file
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-alsaqi}:${POSTGRES_PASSWORD:-alsaqi}@postgres:5432/${POSTGRES_DB:-alsaqi}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alsaqi-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  postgres:
+    image: postgres:15
+    container_name: alsaqi-postgres
+    ports:
+      - "5432:5432"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-alsaqi}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-alsaqi}
+      - POSTGRES_DB=${POSTGRES_DB:-alsaqi}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - alsaqi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-alsaqi} -d ${POSTGRES_DB:-alsaqi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: alsaqi-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - alsaqi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+networks:
+  alsaqi-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: alsaqi_postgres_data

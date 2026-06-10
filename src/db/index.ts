@@ -5,6 +5,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { createSSLConfig, validateSSLConnection } from "./sslConfig.js";
+import { checkSlowQuery, initDbMetrics } from "../monitoring/dbMetrics.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -125,6 +126,17 @@ if (DATABASE_URL && !DATABASE_URL.startsWith('http')) {
 } else {
   // We'll initialize PGlite lazily
   isExternal = false;
+}
+
+/**
+ * Returns the underlying pg.Pool instance if using external PostgreSQL.
+ * Returns null if using PGlite (no pool concept).
+ */
+export function getPool(): pg.Pool | null {
+  if (isExternal && client instanceof pg.Pool) {
+    return client;
+  }
+  return null;
 }
 
 const als = new AsyncLocalStorage<any>();
@@ -306,6 +318,11 @@ export class DBWrapper {
 
   get client() { 
     if (!this._client && !this._isExternal) {
+      // In production, NEVER fall back to PGlite
+      if (process.env.NODE_ENV === 'production') {
+        console.error("[DB] FATAL: No database client available in production. PGlite fallback is disabled.");
+        process.exit(1);
+      }
       this._client = createPgliteClient();
     }
     return this._client; 
@@ -322,6 +339,12 @@ export class DBWrapper {
 
   private async ensureReady() {
     if (this._isExternal) return;
+    
+    // In production, PGlite must never be used
+    if (process.env.NODE_ENV === 'production') {
+      console.error("[DB] FATAL: PGlite is not allowed in production. Ensure PostgreSQL is configured.");
+      process.exit(1);
+    }
     
     // Ensure client exists (lazy init)
     if (!this._client) {
@@ -424,7 +447,10 @@ export class DBWrapper {
         const unlock = this.isExternal ? () => {} : await dbLock.acquireRead();
         try {
           await this.ensureReady();
+          const startTime = performance.now();
           const res = await executeWithRetry(conn => conn.query(convertedSql, params));
+          const durationMs = performance.now() - startTime;
+          checkSlowQuery(convertedSql, durationMs);
           return res.rows ? res.rows[0] : undefined;
         } catch (error) {
           console.error(`[DB ERROR] GET: ${convertedSql}`, error);
@@ -437,7 +463,10 @@ export class DBWrapper {
         const unlock = this.isExternal ? () => {} : await dbLock.acquireRead();
         try {
           await this.ensureReady();
+          const startTime = performance.now();
           const res = await executeWithRetry(conn => conn.query(convertedSql, params));
+          const durationMs = performance.now() - startTime;
+          checkSlowQuery(convertedSql, durationMs);
           return res.rows || [];
         } catch (error) {
           console.error(`[DB ERROR] ALL: ${convertedSql}`, error);
@@ -456,7 +485,10 @@ export class DBWrapper {
                   finalSql += ' RETURNING *';
               }
               try {
+                  const startTime = performance.now();
                   const res = await executeWithRetry(conn => conn.query(finalSql, params));
+                  const durationMs = performance.now() - startTime;
+                  checkSlowQuery(finalSql, durationMs);
                   return { 
                     lastInsertRowid: (res.rows && res.rows[0] as any)?.id || 0, 
                     changes: res.rowCount || 0 
@@ -466,7 +498,10 @@ export class DBWrapper {
                   throw e;
               }
           } else {
+              const startTime = performance.now();
               const res = await executeWithRetry(conn => conn.query(finalSql, params));
+              const durationMs = performance.now() - startTime;
+              checkSlowQuery(finalSql, durationMs);
               return { lastInsertRowid: 0, changes: res.rowCount || 0 };
           }
         } catch (error) {
@@ -557,7 +592,10 @@ export class DBWrapper {
         }
       };
 
+      const startTime = performance.now();
       await executeWithRetry();
+      const durationMs = performance.now() - startTime;
+      checkSlowQuery(sql, durationMs);
     } catch (error) {
       console.error(`[DB ERROR] EXEC: ${sql.substring(0, 100)}...`, error);
       throw error;
@@ -569,27 +607,150 @@ export class DBWrapper {
 
 export const db: IDBWrapper = new DBWrapper(client, isExternal);
 
-export const initDb = async () => {
-  if (DATABASE_URL && isExternal) {
+/**
+ * Classifies a database connection error into a human-readable type.
+ */
+function classifyConnectionError(err: any): string {
+  const message = (err.message || String(err)).toLowerCase();
+  const code = err.code || '';
+
+  if (code === 'ECONNREFUSED' || message.includes('econnrefused') || message.includes('connection refused')) {
+    return 'connection refused';
+  }
+  if (code === 'ETIMEDOUT' || message.includes('timeout') || message.includes('timed out')) {
+    return 'connection timeout';
+  }
+  if (message.includes('password') || message.includes('authentication') || message.includes('auth') || code === '28P01' || code === '28000') {
+    return 'bad credentials';
+  }
+  if (message.includes('ssl') || message.includes('certificate')) {
+    return 'SSL/TLS error';
+  }
+  if (message.includes('does not exist') || message.includes('no such host') || code === 'ENOTFOUND') {
+    return 'host not found';
+  }
+  return 'unknown error';
+}
+
+/**
+ * Extracts the target server address from DATABASE_URL for logging purposes.
+ * Masks credentials to avoid leaking sensitive info.
+ */
+function getTargetServerAddress(): string {
+  if (!DATABASE_URL) return 'unknown';
+  try {
+    const url = new URL(DATABASE_URL);
+    return `${url.hostname}:${url.port || '5432'}`;
+  } catch {
+    // If URL parsing fails, try to extract host manually
+    const match = DATABASE_URL.match(/@([^:/]+)(:\d+)?/);
+    if (match) {
+      return `${match[1]}${match[2] || ':5432'}`;
+    }
+    return 'unknown';
+  }
+}
+
+/**
+ * Attempts to connect to PostgreSQL with retry logic.
+ * Returns true if connection succeeds, false if all retries are exhausted.
+ */
+async function connectWithRetry(pool: any, maxRetries: number, retryIntervalMs: number): Promise<{ success: boolean; lastError: any }> {
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // In production, validate SSL connection — refuse to start if it fails
-      if (process.env.NODE_ENV === 'production') {
-        try {
-          await validateSSLConnection(client);
-          console.log("[DB] Production SSL connection validated successfully.");
-        } catch (sslErr: any) {
-          console.error(`[DB] FATAL: ${sslErr.message}`);
+      await pool.query('SELECT 1');
+      return { success: true, lastError: null };
+    } catch (err: any) {
+      lastError = err;
+      const errorType = classifyConnectionError(err);
+      const target = getTargetServerAddress();
+      console.error(
+        `[DB] Connection attempt ${attempt}/${maxRetries} failed: ${errorType} (target: ${target}) - ${err.message}`
+      );
+
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, retryIntervalMs));
+      }
+    }
+  }
+
+  return { success: false, lastError };
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+export const initDb = async () => {
+  // In production, PGlite must NEVER be used
+  if (isProduction && !isExternal) {
+    const target = getTargetServerAddress();
+    console.error(
+      `[DB] FATAL: No PostgreSQL connection configured in production (target: ${target}). ` +
+      `DATABASE_URL is missing or invalid. PGlite cannot be used in production.`
+    );
+    process.exit(1);
+  }
+
+  if (DATABASE_URL && isExternal) {
+    if (isProduction) {
+      // Production: validate SSL connection with retry logic (3 attempts, 2s intervals)
+      const MAX_RETRIES = 3;
+      const RETRY_INTERVAL_MS = 2000;
+
+      // First validate SSL if applicable
+      try {
+        const { success, lastError } = await connectWithRetry(client, MAX_RETRIES, RETRY_INTERVAL_MS);
+
+        if (!success) {
+          const errorType = classifyConnectionError(lastError);
+          const target = getTargetServerAddress();
+          console.error(
+            `[DB] FATAL: PostgreSQL connection failed after ${MAX_RETRIES} attempts. ` +
+            `Error type: ${errorType}. Target: ${target}. ` +
+            `Last error: ${lastError?.message || String(lastError)}`
+          );
           process.exit(1);
         }
-      } else {
-        await client.query('SELECT 1');
+
+        // Validate SSL connection in production
+        try {
+          await validateSSLConnection(client);
+          console.log("[DB] Production PostgreSQL connection validated successfully.");
+          // Initialize pool metrics monitoring
+          initDbMetrics(client);
+        } catch (sslErr: any) {
+          const target = getTargetServerAddress();
+          console.error(
+            `[DB] FATAL: SSL validation failed. Error type: SSL/TLS error. Target: ${target}. ${sslErr.message}`
+          );
+          process.exit(1);
+        }
+      } catch (err: any) {
+        // Catch any unexpected errors during connection setup
+        const errorType = classifyConnectionError(err);
+        const target = getTargetServerAddress();
+        console.error(
+          `[DB] FATAL: Unexpected error during database initialization. ` +
+          `Error type: ${errorType}. Target: ${target}. ${err.message}`
+        );
+        process.exit(1);
       }
-    } catch (err: any) {
-      console.error("[DB] External PostgreSQL connection failed. Falling back to PGlite.", err.message);
-      const pgliteClient = createPgliteClient();
-      db.updateClient(pgliteClient, false);
+    } else {
+      // Non-production: attempt connection, fall back to PGlite if it fails
+      try {
+        await client.query('SELECT 1');
+        console.log("[DB] External PostgreSQL connection established.");
+        // Initialize pool metrics monitoring for non-production
+        initDbMetrics(client);
+      } catch (err: any) {
+        console.error("[DB] External PostgreSQL connection failed. Falling back to PGlite.", err.message);
+        const pgliteClient = createPgliteClient();
+        db.updateClient(pgliteClient, false);
+      }
     }
   } else if (!isExternal) {
+    // Non-production PGlite initialization
     try {
       if (db.client.waitReady) {
         await db.client.waitReady;
