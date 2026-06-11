@@ -1,6 +1,6 @@
-# docker-compose.yml - Local development and production orchestration
-# Requirement 7.2: application (port 3000), PostgreSQL (port 5432), Redis (port 6379)
-# within a single internal bridge network, passing environment variables via .env file
+# docker-compose.yml - Production orchestration
+# Application exposes port 3000; PostgreSQL and Redis are internal-only (no host ports)
+# Services communicate via the alsaqi-network bridge network, environment variables via .env file
 
 services:
   api:
@@ -14,7 +14,7 @@ services:
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-alsaqi}:${POSTGRES_PASSWORD:-alsaqi}@postgres:5432/${POSTGRES_DB:-alsaqi}
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379
     depends_on:
       postgres:
         condition: service_healthy
@@ -31,8 +31,6 @@ services:
   postgres:
     image: postgres:15
     container_name: alsaqi-postgres
-    ports:
-      - "5432:5432"
     env_file:
       - .env
     environment:
@@ -54,13 +52,12 @@ services:
   redis:
     image: redis:7-alpine
     container_name: alsaqi-redis
-    ports:
-      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
     networks:
       - alsaqi-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5

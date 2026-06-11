@@ -1,0 +1,15 @@
+# =============================================================================
+# docker-compose.override.yml - Development overrides
+# WARNING: This file must NOT be used in production deployments.
+# It re-exposes internal service ports for local development convenience.
+# This file is auto-loaded by `docker compose` when present in the working directory.
+# Exclude it from production via .dockerignore or deployment scripts.
+# =============================================================================
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+  redis:
+    ports:
+      - "6379:6379"

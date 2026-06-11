@@ -271,13 +271,32 @@ export function isValidNumeric(value: string): boolean {
 
 /**
  * Validates that a value looks like a valid URL.
- * Accepts postgresql://, redis://, rediss://, http://, https:// schemes.
+ * Accepts postgresql://, postgres://, redis://, rediss://, http://, https:// schemes.
+ * For context-specific validation, use isValidDatabaseUrl or isValidRedisUrl.
  */
 export function isValidUrl(value: string): boolean {
   const trimmed = value.trim();
   // Accept common connection string schemes
   const validSchemes = ['postgresql://', 'postgres://', 'redis://', 'rediss://', 'http://', 'https://'];
   return validSchemes.some(scheme => trimmed.startsWith(scheme));
+}
+
+/**
+ * Validates that a value is a valid PostgreSQL URL.
+ * Only accepts postgresql:// or postgres:// schemes.
+ */
+export function isValidDatabaseUrl(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith('postgresql://') || trimmed.startsWith('postgres://');
+}
+
+/**
+ * Validates that a value is a valid Redis URL.
+ * Only accepts redis:// or rediss:// schemes.
+ */
+export function isValidRedisUrl(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith('redis://') || trimmed.startsWith('rediss://');
 }
 
 /**
@@ -304,14 +323,22 @@ export function isValidLogLevel(value: string): boolean {
 
 /**
  * Validates a single environment variable value against its expected type.
+ * For URL types, optionally accepts a variable name to apply context-specific validation.
  */
-export function validateType(value: string, type: EnvVarType): boolean {
+export function validateType(value: string, type: EnvVarType, variableName?: string): boolean {
   switch (type) {
     case 'string':
       return value.length > 0;
     case 'numeric':
       return isValidNumeric(value);
     case 'url':
+      // Context-specific URL validation based on variable name
+      if (variableName === 'DATABASE_URL') {
+        return isValidDatabaseUrl(value);
+      }
+      if (variableName === 'REDIS_URL') {
+        return isValidRedisUrl(value);
+      }
       return isValidUrl(value);
     case 'boolean':
       return isValidBoolean(value);
@@ -389,7 +416,7 @@ export function validateEnvironment(
     }
 
     // Check type correctness
-    if (!validateType(value, def.type)) {
+    if (!validateType(value, def.type, def.name)) {
       const errorEntry: ValidationError = {
         variable: def.name,
         message: `${def.name} has invalid format: expected ${typeDescription(def.type)}, received "${sanitizeValue(value, def.name)}"`,
