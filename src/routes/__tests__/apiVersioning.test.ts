@@ -121,13 +121,101 @@ vi.mock('../permissionAdmin', () => ({ createPermissionAdminRoutes: () => requir
 vi.mock('../archive', () => ({ createArchiveRoutes: () => require('express').Router() }));
 vi.mock('../lookups', () => ({ createLookupRoutes: () => require('express').Router() }));
 vi.mock('../../middleware/idempotency', () => ({ createIdempotencyMiddleware: () => (req: any, res: any, next: any) => next() }));
+vi.mock('../reports', () => ({ createReportsRoutes: () => require('express').Router() }));
 
-import { setupRoutes, CURRENT_API_VERSION, SUPPORTED_VERSIONS } from '../index';
+import { createV1Router } from '../v1/index';
+// Version constants now live in the non-deleted middleware module (formerly
+// duplicated in the dead src/routes/index.ts that this migration removes).
+import { CURRENT_API_VERSION, SUPPORTED_VERSIONS } from '../../middleware/versionRewrite';
+import { db } from '../../db/index';
 
+/**
+ * Builds a test app from the live `createV1Router`, replicating the version
+ * middleware that the (now removed) `setupRoutes` wired up:
+ *   - X-API-Version header on all /api/ responses
+ *   - 404 (VERSION_NOT_FOUND) for unsupported / non-numeric version segments
+ *   - fallback rewrite of /api/{resource} to /api/v1/{resource}
+ *   - the v1 router mounted under /api/v1
+ *   - a terminal /api 404 handler
+ */
 function createTestApp() {
   const app = express();
   app.use(express.json());
-  setupRoutes(app, 'jwt-secret', 'jwt-private', 'jwt-public', vi.fn(), vi.fn());
+
+  // X-API-Version header on all /api/ responses
+  app.use('/api/', (req: any, res: any, next: any) => {
+    res.setHeader('X-API-Version', `${CURRENT_API_VERSION.major}.${CURRENT_API_VERSION.minor}`);
+    next();
+  });
+
+  // Unsupported Version Handler — intercept /api/v{n}/ where n is not supported
+  // (or non-numeric). Must run before the fallback rewrite and versioned routes.
+  app.use('/api/v:version', (req: any, res: any, next: any) => {
+    const versionStr = req.params.version;
+    const versionNum = parseInt(versionStr, 10);
+
+    if (isNaN(versionNum) || versionNum < 1 || !Number.isInteger(Number(versionStr))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'VERSION_NOT_FOUND',
+          message: `API version 'v${versionStr}' is not available. Supported versions: ${SUPPORTED_VERSIONS.map((v) => `v${v}`).join(', ')}`,
+        },
+      });
+    }
+
+    if (!SUPPORTED_VERSIONS.includes(versionNum)) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'VERSION_NOT_FOUND',
+          message: `API version 'v${versionNum}' is not available. Supported versions: ${SUPPORTED_VERSIONS.map((v) => `v${v}`).join(', ')}`,
+        },
+      });
+    }
+
+    // Supported version (v1) — continue to the mounted v1 router below.
+    next();
+  });
+
+  // Version Fallback — rewrite /api/{resource} to /api/v1/{resource}
+  app.use('/api', (req: any, res: any, next: any) => {
+    if (/^\/v\d+/.test(req.path)) {
+      return next();
+    }
+    req.url = `/v${CURRENT_API_VERSION.major}${req.url === '/' ? '' : req.url}`;
+    next();
+  });
+
+  // Live v1 router (all route modules mocked above)
+  const v1Router = createV1Router({
+    db,
+    authenticate: (req: any, _res: any, next: any) => {
+      req.user = { id: 'test-user', role: 'Admin', username: 'test' };
+      next();
+    },
+    authorize: () => (req: any, res: any, next: any) => next(),
+    checkPermission: () => (req: any, res: any, next: any) => next(),
+    authLimiter: (req: any, res: any, next: any) => next(),
+    createNotification: vi.fn(),
+    createCrudRoutes: () => require('express').Router(),
+    saveFile: vi.fn(),
+    logError: vi.fn(),
+    config: { jwtSecret: 'jwt-secret', jwtPrivateKey: 'jwt-private', jwtPublicKey: 'jwt-public' } as any,
+    idempotencyMiddleware: (req: any, res: any, next: any) => next(),
+    queueService: null,
+    storageService: null,
+  });
+  app.use('/api/v1', v1Router);
+
+  // Terminal API 404 handler (mirrors the live notFoundHandler for /api)
+  app.use('/api', (req: any, res: any) => {
+    res.status(404).json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: `API endpoint ${req.originalUrl} not found` },
+    });
+  });
+
   return app;
 }
 

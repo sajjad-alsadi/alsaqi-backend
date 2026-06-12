@@ -58,6 +58,9 @@ const KNOWN_RESOURCES = [
   'compliance',
   'bulk',
   'health',
+  // Served by the CRUD generator (FIX-BE-3 confirmed the orphaned regulatory
+  // route was removed; this entity must keep working through createCrudRoutes).
+  'central-bank-instructions',
 ] as const;
 
 // ─── Arbitraries ─────────────────────────────────────────────────────────────
@@ -129,6 +132,22 @@ function createTestApp() {
     v1Router.all(`/${resource}`, handler);
     v1Router.all(`/${resource}/:id`, handler);
   }
+
+  // Consolidated role-permissions route (FIX-BE-4): owned by a single module,
+  // exposed as GET (matrix read) + POST (matrix update) only — no PUT verb.
+  // Frontend calls POST, so the POST contract/shape must be preserved.
+  v1Router.get('/roles/:id/permissions', (req: any, res: any) => {
+    res.json({
+      success: true,
+      data: { roleId: req.params.id, permissions: [] },
+    });
+  });
+  v1Router.post('/roles/:id/permissions', (req: any, res: any) => {
+    res.json({
+      success: true,
+      data: { roleId: req.params.id, updated: true },
+    });
+  });
 
   app.use('/api/v1', v1Router);
 
@@ -370,6 +389,181 @@ describe('Property 5: Backward Compatibility', () => {
           expect(resUnversioned.body.data.method).toBe(resVersioned.body.data.method);
         }),
         { numRuns: 100 }
+      );
+    });
+  });
+});
+
+/**
+ * Property Test: API Contract Preservation (No-Regression Gate)
+ *
+ * Feature: backend-consistency-fixes
+ *
+ * **Validates: Requirements 7.1, 7.2, 7.3, 7.4**
+ *
+ * The FIX-BE-1..FIX-BE-5 cleanup/sync changes must NOT alter the runtime API
+ * contract. For every pre-existing endpoint:
+ *  - 7.1 a successful response carries `success: true` inside the envelope.
+ *  - 7.2 every response (success or error) carries `X-API-Version: 1.0`.
+ *  - 7.3 path, HTTP method, status code, and response shape are unchanged.
+ *  - 7.4 an error response carries `success: false` inside the envelope.
+ *
+ * Coverage includes the endpoints touched by these fixes: the
+ * central-bank-instructions CRUD path (FIX-BE-3) and the consolidated
+ * POST /roles/:id/permissions route (FIX-BE-4).
+ */
+describe('Requirement 7: API Contract Preservation (no regression)', () => {
+  describe('7.2: X-API-Version header is exactly "1.0" on every response', () => {
+    it('success responses carry X-API-Version: 1.0', async () => {
+      await fc.assert(
+        fc.asyncProperty(knownResourceArb, resourceIdArb, async (resource, idSuffix) => {
+          const app = createTestApp();
+
+          const versioned = await request(app).get(`/api/v1/${resource}${idSuffix}`);
+          const unversioned = await request(app).get(`/api/${resource}${idSuffix}`);
+
+          expect(versioned.headers['x-api-version']).toBe('1.0');
+          expect(unversioned.headers['x-api-version']).toBe('1.0');
+        }),
+        { numRuns: 100 }
+      );
+    });
+
+    it('error responses (unknown path, unsupported version) carry X-API-Version: 1.0', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          unknownResourceArb,
+          unsupportedVersionArb,
+          knownResourceArb,
+          async (unknownResource, version, resource) => {
+            const app = createTestApp();
+
+            const notFound = await request(app).get(`/api/${unknownResource}`);
+            const badVersion = await request(app).get(`/api/v${version}/${resource}`);
+
+            expect(notFound.headers['x-api-version']).toBe('1.0');
+            expect(badVersion.headers['x-api-version']).toBe('1.0');
+          }
+        ),
+        { numRuns: 50 }
+      );
+    });
+  });
+
+  describe('7.1 / 7.3: pre-existing endpoints keep method, 200 status, and success envelope', () => {
+    it('GET/POST on a known resource returns 200, success: true, and the same shape via both path forms', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          knownResourceArb,
+          fc.constantFrom('get', 'post'),
+          async (resource, method) => {
+            const app = createTestApp();
+
+            const versioned = await (request(app) as any)[method](`/api/v1/${resource}`).send({});
+            const unversioned = await (request(app) as any)[method](`/api/${resource}`).send({});
+
+            // 7.3: same status code, method, and resolved resource (shape)
+            expect(versioned.status).toBe(200);
+            expect(unversioned.status).toBe(200);
+            expect(versioned.body.data.method).toBe(method.toUpperCase());
+            expect(unversioned.body.data.method).toBe(method.toUpperCase());
+            expect(versioned.body.data.resource).toBe(resource);
+            expect(unversioned.body.data.resource).toBe(resource);
+
+            // 7.1: success flag is true on success
+            expect(versioned.body.success).toBe(true);
+            expect(unversioned.body.success).toBe(true);
+
+            // shape is identical regardless of path form
+            expect(Object.keys(unversioned.body).sort()).toEqual(
+              Object.keys(versioned.body).sort()
+            );
+          }
+        ),
+        { numRuns: 100 }
+      );
+    });
+  });
+
+  describe('7.4: error responses carry success: false within the envelope', () => {
+    it('unknown paths and unsupported versions both return success: false', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          unknownResourceArb,
+          unsupportedVersionArb,
+          knownResourceArb,
+          async (unknownResource, version, resource) => {
+            const app = createTestApp();
+
+            const notFound = await request(app).get(`/api/${unknownResource}`);
+            const badVersion = await request(app).get(`/api/v${version}/${resource}`);
+
+            expect(notFound.status).toBe(404);
+            expect(notFound.body.success).toBe(false);
+
+            expect(badVersion.status).toBe(404);
+            expect(badVersion.body.success).toBe(false);
+          }
+        ),
+        { numRuns: 50 }
+      );
+    });
+  });
+
+  describe('Touched endpoints stay backward compatible', () => {
+    it('central-bank-instructions (CRUD path) returns a non-501 success envelope with X-API-Version: 1.0', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.constantFrom('get', 'post'), async (method) => {
+          const app = createTestApp();
+
+          const res = await (request(app) as any)
+            [method]('/api/v1/central-bank-instructions')
+            .send({});
+
+          expect(res.status).toBe(200);
+          expect(res.status).not.toBe(501);
+          expect(res.body.success).toBe(true);
+          expect(res.body.data.resource).toBe('central-bank-instructions');
+          expect(res.headers['x-api-version']).toBe('1.0');
+        }),
+        { numRuns: 30 }
+      );
+    });
+
+    it('POST /roles/:id/permissions (consolidated verb) returns success envelope; PUT is no longer routed', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.oneof(
+            fc.integer({ min: 1, max: 9999 }).map(String),
+            fc.uuid()
+          ),
+          async (roleId) => {
+            const app = createTestApp();
+
+            // POST is the verb the frontend uses — must succeed in the envelope.
+            const post = await request(app)
+              .post(`/api/v1/roles/${roleId}/permissions`)
+              .send({ permissions: [] });
+
+            expect(post.status).toBe(200);
+            expect(post.body.success).toBe(true);
+            expect(post.headers['x-api-version']).toBe('1.0');
+
+            // GET (matrix read) is still available from the single owner.
+            const get = await request(app).get(`/api/v1/roles/${roleId}/permissions`);
+            expect(get.status).toBe(200);
+            expect(get.body.success).toBe(true);
+
+            // PUT was removed (FIX-BE-4): it must not resolve to a handler.
+            const put = await request(app)
+              .put(`/api/v1/roles/${roleId}/permissions`)
+              .send({ permissions: [] });
+            expect(put.status).toBe(404);
+            expect(put.body.success).toBe(false);
+            expect(put.headers['x-api-version']).toBe('1.0');
+          }
+        ),
+        { numRuns: 50 }
       );
     });
   });

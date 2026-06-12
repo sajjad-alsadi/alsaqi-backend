@@ -339,3 +339,57 @@ export interface FraudCase {
   status: string;
   notes?: string;
 }
+
+// ─── Dashboard Stats ──────────────────────────────────────────────────────────
+
+/** A single row in the audit progress-by-type breakdown. */
+export interface AuditProgressByType {
+  type: string;
+  planned: number;
+  completed: number;
+}
+
+/** A single risk-level bucket in the dashboard risk overview. */
+export interface RiskLevelBreakdown {
+  level: string;
+  count: number;
+}
+
+/**
+ * Aggregated dashboard statistics returned by `GET /v1/dashboard-stats`.
+ */
+export interface DashboardStats {
+  audits: { total: number; completed: number; progress_by_type: AuditProgressByType[] };
+  findings: { summary: { open: number; high_risk_open: number } };
+  recommendations: { open: number; overdue: number };
+  risks: { summary: { total: number; high: number }; byLevel?: RiskLevelBreakdown[] };
+  correspondence: { incoming_total: number; outgoing_total: number; pending_responses: number };
+  compliance: { total: number };
+  activity: Array<Record<string, unknown>>;
+}
+
+// ─── User Management ────────────────────────────────────────────────────────────
+
+export interface Role { id: string | number; name: string; description?: string; }
+export interface Permission { id: string | number; module: string; action: string; }
+export interface UserSession {
+  id: string | number;
+  user_id: string | number;
+  ip_address?: string;
+  user_agent?: string;
+  created_at?: string;
+  expires_at?: string;
+}
+export interface JobTitle { id: string | number; name: string; name_ar?: string; name_en?: string; }
+export interface UserManagementSettings {
+  failed_login_threshold?: number;
+  inactive_account_threshold_days?: number;
+  password_min_length?: number;
+  password_require_uppercase?: number;
+  password_require_lowercase?: number;
+  password_require_numbers?: number;
+  password_require_symbols?: number;
+  password_expiry_days?: number;
+  enforce_single_session?: number;
+  session_timeout_minutes?: number;
+}

@@ -82,3 +82,65 @@ export {
   type LinkCorrespondenceInput,
   type CorrespondenceStatusUpdateInput,
 } from './correspondence';
+
+// Risk register schemas
+export {
+  CreateRiskRegisterSchema,
+  UpdateRiskRegisterSchema,
+  type CreateRiskRegisterInput,
+  type UpdateRiskRegisterInput,
+} from './risk-register';
+
+// Central bank instructions schemas
+export {
+  CreateCentralBankInstructionSchema,
+  UpdateCentralBankInstructionSchema,
+  type CreateCentralBankInstructionInput,
+  type UpdateCentralBankInstructionInput,
+} from './central-bank-instructions';
+
+// Dashboard stats schemas
+export {
+  DashboardStatsResponseSchema,
+  AuditProgressByTypeSchema,
+  RiskLevelBreakdownSchema,
+  type DashboardStatsResponse,
+  type AuditProgressByTypeOutput,
+  type RiskLevelBreakdownOutput,
+} from './dashboard-stats';
+
+// User management schemas
+// NOTE: the inferred `Permission` type is aliased to `PermissionRow` here to
+// avoid a name collision with the `Permission` model interface exported from
+// `./types/models` (both are surfaced through the top-level barrel via `export *`).
+export {
+  UserSummaryResponseSchema,
+  UserManagementSettingsResponseSchema,
+  UpdateUserManagementSettingsSchema,
+  LoginHistoryEntrySchema,
+  LoginHistoryResponseSchema,
+  AuditTrailEntrySchema,
+  AuditTrailResponseSchema,
+  PermissionSchema,
+  PermissionsResponseSchema,
+  PermissionMatrixSchema,
+  RolePermissionMatrixResponseSchema,
+  UpdateRolePermissionsSchema,
+  RolePermissionUpdateResultSchema,
+  RoleWithPermissionsSchema,
+  UserManagementInitResponseSchema,
+  PaginationSchema,
+  type UserSummaryResponse,
+  type UserManagementSettingsResponse,
+  type UpdateUserManagementSettingsInput,
+  type LoginHistoryEntry,
+  type LoginHistoryResponse,
+  type AuditTrailEntry,
+  type AuditTrailResponse,
+  type Permission as PermissionRow,
+  type PermissionsResponse,
+  type RolePermissionMatrixResponse,
+  type UpdateRolePermissionsInput,
+  type RolePermissionUpdateResult,
+  type UserManagementInitResponse,
+} from './user-management';

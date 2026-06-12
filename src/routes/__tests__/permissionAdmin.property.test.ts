@@ -397,7 +397,7 @@ describe('Property 16: Permission Matrix Update with Cache Invalidation', () => 
 
           const app = createTestApp(mockDb);
           const res = await request(app)
-            .put(`/roles/${roleId}/permissions`)
+            .post(`/roles/${roleId}/permissions`)
             .send({ permissions });
 
           expect(res.status).toBe(200);
@@ -433,7 +433,7 @@ describe('Property 16: Permission Matrix Update with Cache Invalidation', () => 
 
           const app = createTestApp(mockDb);
           const res = await request(app)
-            .put(`/roles/${roleId}/permissions`)
+            .post(`/roles/${roleId}/permissions`)
             .send({ permissions: [{ module: 'Dashboard', action: 'View', granted: true }] });
 
           expect(res.status).toBe(403);

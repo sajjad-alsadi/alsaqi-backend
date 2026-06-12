@@ -18,7 +18,7 @@ import { permissionAdminRateLimiter } from '../middleware/permissionAdminRateLim
  *
  * Permission matrix:
  * - GET /roles/:id/permissions - return complete permission matrix for a role
- * - PUT /roles/:id/permissions - update custom role permissions
+ * - POST /roles/:id/permissions - update custom role permissions
  * - GET /permissions/modules - return all registered modules with metadata
  * - GET /permissions/me - return authenticated user's effective permissions
  *
@@ -424,9 +424,9 @@ export const createPermissionAdminRoutes = (
     })
   );
 
-  // ─── PUT /roles/:id/permissions - Update role's permission matrix ──────
+  // ─── POST /roles/:id/permissions - Update role's permission matrix ─────
 
-  router.put(
+  router.post(
     '/roles/:id/permissions',
     authenticate,
     checkPermission('UserManagement', 'Edit'),

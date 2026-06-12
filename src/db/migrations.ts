@@ -857,17 +857,24 @@ export const runMigrations = async () => {
     }
   }
 
-  // Add missing foreign key constraints for columns added via ALTER TABLE
+  // Add missing foreign key constraints for columns added via ALTER TABLE.
+  // Each entry includes the constraint name so we can check for its existence
+  // before attempting to add it (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
   const foreignKeys = [
-    { table: "users", constraint: "ALTER TABLE users ADD CONSTRAINT fk_org_entity FOREIGN KEY (org_entity_id) REFERENCES org_entities(id) ON DELETE SET NULL" },
-    { table: "users", constraint: "ALTER TABLE users ADD CONSTRAINT fk_manager FOREIGN KEY (reporting_manager_id) REFERENCES users(id) ON DELETE SET NULL" },
-    { table: "password_reset_requests", constraint: "ALTER TABLE password_reset_requests ADD CONSTRAINT fk_resolved_by FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE SET NULL" },
-    { table: "fraud_access_requests", constraint: "ALTER TABLE fraud_access_requests ADD CONSTRAINT fk_responded_by FOREIGN KEY (responded_by) REFERENCES users(id) ON DELETE SET NULL" }
+    { table: "users", name: "fk_org_entity", constraint: "ALTER TABLE users ADD CONSTRAINT fk_org_entity FOREIGN KEY (org_entity_id) REFERENCES org_entities(id) ON DELETE SET NULL" },
+    { table: "users", name: "fk_manager", constraint: "ALTER TABLE users ADD CONSTRAINT fk_manager FOREIGN KEY (reporting_manager_id) REFERENCES users(id) ON DELETE SET NULL" },
+    { table: "password_reset_requests", name: "fk_resolved_by", constraint: "ALTER TABLE password_reset_requests ADD CONSTRAINT fk_resolved_by FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE SET NULL" },
+    { table: "fraud_access_requests", name: "fk_responded_by", constraint: "ALTER TABLE fraud_access_requests ADD CONSTRAINT fk_responded_by FOREIGN KEY (responded_by) REFERENCES users(id) ON DELETE SET NULL" }
   ];
 
   for (const fk of foreignKeys) {
     try {
-      // Postgres will throw if constraint already exists or if data violates it.
+      // Skip if the constraint already exists to avoid noisy duplicate errors.
+      const existing = await db.prepare(
+        "SELECT 1 FROM pg_constraint WHERE conname = ?"
+      ).get(fk.name);
+      if (existing) continue;
+
       await db.prepare(fk.constraint).run();
     } catch (e: any) {
       if (!e.message.includes('already exists')) {
@@ -1071,7 +1078,7 @@ export const runMigrations = async () => {
           'cbi_instruction',
           'البنك المركزي العراقي',
           category,
-          issue_date,
+          NULLIF(issue_date, '')::date,
           description,
           CASE WHEN status = 'Active' THEN 'compliant' ELSE 'under_review' END,
           CURRENT_TIMESTAMP
@@ -1088,7 +1095,7 @@ export const runMigrations = async () => {
           title,
           'law',
           authority,
-          issue_date,
+          NULLIF(issue_date, '')::date,
           keywords,
           'under_review',
           CURRENT_TIMESTAMP
@@ -1105,7 +1112,7 @@ export const runMigrations = async () => {
           title,
           'internal_policy',
           version,
-          upload_date,
+          NULLIF(upload_date, '')::date,
           file_url,
           CASE WHEN status = 'Active' THEN 'compliant' ELSE 'under_review' END,
           CURRENT_TIMESTAMP
