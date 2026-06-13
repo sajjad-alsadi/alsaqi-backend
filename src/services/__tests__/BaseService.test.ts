@@ -22,6 +22,10 @@ const { mockSendEvent } = vi.hoisted(() => ({
   mockSendEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
+const { mockAuditAppend } = vi.hoisted(() => ({
+  mockAuditAppend: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock the database module
 vi.mock('../../db/index', () => ({
   db: {
@@ -46,6 +50,13 @@ vi.mock('../../utils/n8nService', () => ({
   },
 }));
 
+// Mock AuditChainService - logAudit now delegates to its single canonical append
+vi.mock('../AuditChainService', () => ({
+  AuditChainService: {
+    append: mockAuditAppend,
+  },
+}));
+
 // Mock crypto
 vi.mock('crypto', () => ({
   default: {
@@ -58,6 +69,7 @@ vi.mock('crypto', () => ({
 
 import { BaseService } from '../BaseService';
 import { NotFoundError, ValidationError } from '../../utils/errors';
+import { clearCountCache } from '../countCache';
 
 describe('BaseService', () => {
   let mockGet: ReturnType<typeof vi.fn>;
@@ -66,6 +78,7 @@ describe('BaseService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    clearCountCache();
 
     mockGet = vi.fn();
     mockAll = vi.fn();
@@ -163,6 +176,75 @@ describe('BaseService', () => {
       const dataCall = mockPrepare.mock.calls[1][0];
       expect(dataCall).toContain('ORDER BY id DESC');
     });
+
+    it('should run without a search clause for tables with no configured search columns', async () => {
+      // `departments` has no entry in TABLE_SEARCH_COLUMNS, so there is no
+      // title/name/description fallback and the query runs unfiltered (Req 5.2).
+      mockGet.mockResolvedValueOnce({ total: 3 });
+      mockAll.mockResolvedValueOnce([{ id: 1, name: 'Dept' }]);
+
+      const result = await BaseService.findAll('departments', { where: { search: 'anything' } });
+
+      const countCall = mockPrepare.mock.calls[0][0];
+      const dataCall = mockPrepare.mock.calls[1][0];
+      expect(countCall).not.toContain('LIKE');
+      expect(dataCall).not.toContain('LIKE');
+      expect(result.data).toHaveLength(1);
+    });
+  });
+
+  describe('findAll (keyset pagination for large-table-configured endpoints)', () => {
+    it('should use composite keyset ordering and return a nextCursor when more rows remain', async () => {
+      // Keyset default page size is 25; return 26 rows so a following page exists.
+      const rows = Array.from({ length: 26 }, (_, i) => ({
+        id: `id-${String(i).padStart(3, '0')}`,
+        created_at: `2024-01-01T00:00:${String(i).padStart(2, '0')}Z`,
+      }));
+      mockAll.mockResolvedValueOnce(rows);
+      mockGet.mockResolvedValueOnce({ total: 5000 });
+
+      const result = await BaseService.findAll('audit_findings');
+
+      // The keyset SELECT orders by the composite deterministic key.
+      const dataSql = mockPrepare.mock.calls[0][0];
+      expect(dataSql).toContain('ORDER BY created_at DESC, id DESC');
+
+      expect(result.data).toHaveLength(25);
+      expect(typeof result.nextCursor).toBe('string');
+      expect(result.pagination.total).toBe(5000);
+    });
+
+    it('should not return a nextCursor when no further rows remain', async () => {
+      mockAll.mockResolvedValueOnce([
+        { id: 'id-1', created_at: '2024-01-01T00:00:00Z' },
+      ]);
+      mockGet.mockResolvedValueOnce({ total: 1 });
+
+      const result = await BaseService.findAll('audit_findings');
+
+      expect(result.data).toHaveLength(1);
+      expect(result.nextCursor).toBeNull();
+    });
+
+    it('should serve the total count from cache rather than running COUNT(*) on every request', async () => {
+      mockAll.mockResolvedValue([]);
+      mockGet.mockResolvedValue({ total: 1234 });
+
+      await BaseService.findAll('audit_findings');
+      await BaseService.findAll('audit_findings');
+
+      // COUNT(*) must be issued only once across the two identical requests (Req 6.5).
+      const countCalls = mockPrepare.mock.calls.filter((c: any[]) =>
+        String(c[0]).includes('COUNT(*)')
+      );
+      expect(countCalls).toHaveLength(1);
+    });
+
+    it('should reject a malformed cursor with a ValidationError', async () => {
+      await expect(
+        BaseService.findAll('audit_findings', { cursor: 'not-a-valid-cursor!!!' })
+      ).rejects.toThrow(ValidationError);
+    });
   });
 
   describe('findById', () => {
@@ -192,9 +274,9 @@ describe('BaseService', () => {
   });
 
   describe('create', () => {
-    it('should remove restricted fields (id, created_at, updated_at) from body', async () => {
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 10, changes: 1 });
-
+    it('should reject the entire request when it contains non-whitelisted fields (id, created_at, updated_at)', async () => {
+      // id/created_at/updated_at are system-managed and absent from the write
+      // schema, so the whole request is rejected and no row is created (Req 4.3).
       const data = {
         id: 999,
         created_at: '2024-01-01',
@@ -203,13 +285,20 @@ describe('BaseService', () => {
         department: 'IT',
       };
 
-      const result = await BaseService.create('audit_plans', data);
+      await expect(BaseService.create('audit_plans', data)).rejects.toThrow(ValidationError);
+      await expect(BaseService.create('audit_plans', data)).rejects.toThrow(/not permitted/i);
 
-      // The result should not contain restricted fields
-      expect(result).not.toHaveProperty('created_at');
-      expect(result).not.toHaveProperty('updated_at');
-      expect(result.id).toBe(10); // Should use lastInsertRowid
-      expect(result.title).toBe('New Plan');
+      // No INSERT should have been issued for the rejected request.
+      expect(mockRun).not.toHaveBeenCalled();
+      const issuedSql = mockPrepare.mock.calls.map((c: any[]) => c[0]).join('\n');
+      expect(issuedSql).not.toContain('INSERT INTO');
+    });
+
+    it('should name the rejected keys in the validation error', async () => {
+      const data = { title: 'New Plan', role: 'admin', deleted_at: 'now' };
+
+      await expect(BaseService.create('audit_plans', data)).rejects.toThrow(/role/);
+      await expect(BaseService.create('audit_plans', data)).rejects.toThrow(/deleted_at/);
     });
 
     it('should generate auto-code when code column is empty', async () => {
@@ -239,9 +328,11 @@ describe('BaseService', () => {
       );
     });
 
-    it('should throw ValidationError when no data provided', async () => {
-      // All fields are restricted, so after stripping there's nothing left
-      const data = { id: 1, created_at: '2024-01-01', updated_at: '2024-01-01' };
+    it('should throw ValidationError when no whitelisted data is provided', async () => {
+      // An empty body passes the whitelist (no rejected keys) but yields no
+      // writable columns once auto-code generation produces nothing.
+      mockGenerateCode.mockResolvedValueOnce(null);
+      const data = {};
 
       await expect(
         BaseService.create('audit_plans', data)
@@ -254,34 +345,25 @@ describe('BaseService', () => {
   });
 
   describe('update', () => {
-    it('should remove immutable fields (plan_code, program_code, task_number, etc.)', async () => {
-      mockGet.mockResolvedValueOnce({ id: 1 }); // RETURNING id
-
+    it('should reject the entire request when it contains non-whitelisted fields (mass-assignment)', async () => {
+      // role and deleted_at are not writable for audit_plans, so the whole
+      // request is rejected and the existing row is left unchanged (Req 4.3, 4.4).
       const data = {
-        plan_code: 'HACK-CODE',
-        program_code: 'HACK-PROG',
-        task_number: 'HACK-TASK',
-        finding_number: 'HACK-FIND',
-        rec_number: 'HACK-REC',
-        risk_id: 'HACK-RISK',
-        employee_id: 'HACK-EMP',
         title: 'Updated Title',
+        status: 'Active',
+        role: 'admin',
+        deleted_at: 'now',
       };
 
-      const result = await BaseService.update('audit_plans', 1, data);
+      await expect(BaseService.update('audit_plans', 1, data)).rejects.toThrow(ValidationError);
+      await expect(BaseService.update('audit_plans', 1, data)).rejects.toThrow(/not permitted/i);
 
-      // Only title should remain after stripping immutable fields
-      expect(result.title).toBe('Updated Title');
-      expect(result).not.toHaveProperty('plan_code');
-      expect(result).not.toHaveProperty('program_code');
-      expect(result).not.toHaveProperty('task_number');
-      expect(result).not.toHaveProperty('finding_number');
-      expect(result).not.toHaveProperty('rec_number');
-      expect(result).not.toHaveProperty('risk_id');
-      expect(result).not.toHaveProperty('employee_id');
+      // No UPDATE should have been issued for the rejected request.
+      const issuedSql = mockPrepare.mock.calls.map((c: any[]) => c[0]).join('\n');
+      expect(issuedSql).not.toContain('UPDATE audit_plans SET');
     });
 
-    it('should update record and return result', async () => {
+    it('should update record and return result for whitelisted fields', async () => {
       mockGet.mockResolvedValueOnce({ id: 5 }); // RETURNING id
 
       const data = { title: 'Updated', status: 'Completed' };
@@ -304,15 +386,9 @@ describe('BaseService', () => {
       ).rejects.toThrow(NotFoundError);
     });
 
-    it('should throw ValidationError when no data provided after stripping immutable fields', async () => {
-      // All provided fields are immutable
-      const data = {
-        id: 1,
-        created_at: '2024-01-01',
-        updated_at: '2024-01-01',
-        plan_code: 'CODE',
-        program_code: 'PROG',
-      };
+    it('should throw ValidationError when no data provided', async () => {
+      // An empty body passes the whitelist but leaves nothing to update.
+      const data = {};
 
       await expect(
         BaseService.update('audit_plans', 1, data)
@@ -325,10 +401,119 @@ describe('BaseService', () => {
   });
 
   describe('delete', () => {
-    it('should delete record and return true', async () => {
-      mockRun.mockResolvedValueOnce({ changes: 1 });
+    it('should soft-delete (UPDATE deleted_at) for tables with a deleted_at column', async () => {
+      mockGet.mockResolvedValueOnce({ id: 1 }); // RETURNING id from the soft-delete UPDATE
 
       const result = await BaseService.delete('audit_plans', 1);
+
+      expect(result).toBe(true);
+      const sql = mockPrepare.mock.calls[0][0];
+      expect(sql).toContain('UPDATE audit_plans SET deleted_at = CURRENT_TIMESTAMP');
+      expect(sql).toContain('deleted_at IS NULL');
+      expect(sql).not.toContain('DELETE FROM');
+      expect(mockGet).toHaveBeenCalledWith(1);
+    });
+
+    it('should return NotFoundError when the row is already soft-deleted (no RETURNING row)', async () => {
+      mockGet.mockResolvedValueOnce(undefined); // already soft-deleted -> WHERE deleted_at IS NULL matches nothing
+
+      await expect(BaseService.delete('audit_plans', 1)).rejects.toThrow(NotFoundError);
+      // No hard DELETE should ever be issued on the default path
+      const issuedSql = mockPrepare.mock.calls.map((c: any[]) => c[0]).join('\n');
+      expect(issuedSql).not.toContain('DELETE FROM');
+    });
+
+    it('should hard-delete physically for tables without a deleted_at column', async () => {
+      mockRun.mockResolvedValueOnce({ changes: 1 });
+
+      const result = await BaseService.delete('role_permissions', 1);
+
+      expect(result).toBe(true);
+      expect(mockPrepare).toHaveBeenCalledWith(
+        expect.stringContaining('DELETE FROM role_permissions WHERE id = ?')
+      );
+      expect(mockRun).toHaveBeenCalledWith(1);
+    });
+  });
+
+  // Task 5.12 — soft-delete and count edge cases (Requirements 6.5, 25.4, 25.5)
+  describe('soft-delete and count edge cases (Task 5.12)', () => {
+    it('returns NotFoundError for an already-soft-deleted row and preserves the existing deleted_at', async () => {
+      // RETURNING id yields no row because `deleted_at IS NULL` matches nothing
+      // on an already-soft-deleted target.
+      mockGet.mockResolvedValueOnce(undefined);
+
+      await expect(BaseService.delete('audit_plans', 1)).rejects.toThrow(NotFoundError);
+
+      const issuedSql = mockPrepare.mock.calls.map((c: any[]) => String(c[0]));
+
+      // Exactly one statement is issued: the guarded conditional soft-delete.
+      expect(issuedSql).toHaveLength(1);
+      expect(issuedSql[0]).toContain('UPDATE audit_plans SET deleted_at = CURRENT_TIMESTAMP');
+
+      // The single UPDATE is guarded by `deleted_at IS NULL`, so the preserved
+      // deleted_at on the already-deleted row is never overwritten (Req 25.4).
+      expect(issuedSql[0]).toContain('deleted_at IS NULL');
+
+      // There is no second/unconditional UPDATE that would change deleted_at.
+      const unconditionalUpdates = issuedSql.filter(
+        (sql) => sql.includes('SET deleted_at') && !sql.includes('deleted_at IS NULL')
+      );
+      expect(unconditionalUpdates).toHaveLength(0);
+
+      // The default path issues no hard DELETE.
+      expect(issuedSql.some((sql) => sql.includes('DELETE FROM'))).toBe(false);
+    });
+
+    it('never invokes hardDelete on the default delete path for a soft-delete table (Req 25.5)', async () => {
+      const hardDeleteSpy = vi.spyOn(BaseService, 'hardDelete');
+      mockGet.mockResolvedValueOnce({ id: 1 }); // successful soft-delete
+
+      await BaseService.delete('audit_plans', 1);
+
+      expect(hardDeleteSpy).not.toHaveBeenCalled();
+      hardDeleteSpy.mockRestore();
+    });
+
+    it('never invokes hardDelete on the default delete path for a hard-delete table (Req 25.5)', async () => {
+      // Even when the row has no deleted_at column and is removed physically, the
+      // default delete path must not delegate to the distinct hardDelete operation.
+      const hardDeleteSpy = vi.spyOn(BaseService, 'hardDelete');
+      mockRun.mockResolvedValueOnce({ changes: 1 });
+
+      await BaseService.delete('role_permissions', 1);
+
+      expect(hardDeleteSpy).not.toHaveBeenCalled();
+      hardDeleteSpy.mockRestore();
+    });
+
+    it('serves a cached estimate for a large/keyset table, issuing COUNT(*) at most once within the TTL (Req 6.5)', async () => {
+      mockAll.mockResolvedValue([]);
+      mockGet.mockResolvedValue({ total: 9876 });
+
+      // Several identical list requests within the cache TTL.
+      const r1 = await BaseService.findAll('audit_findings');
+      const r2 = await BaseService.findAll('audit_findings');
+      const r3 = await BaseService.findAll('audit_findings');
+
+      const countCalls = mockPrepare.mock.calls.filter((c: any[]) =>
+        String(c[0]).includes('COUNT(*)')
+      );
+
+      // At most one COUNT(*) is executed across the repeated requests; the rest
+      // are served from the cache rather than a per-request COUNT(*).
+      expect(countCalls.length).toBeLessThanOrEqual(1);
+      expect(r1.pagination.total).toBe(9876);
+      expect(r2.pagination.total).toBe(9876);
+      expect(r3.pagination.total).toBe(9876);
+    });
+  });
+
+  describe('hardDelete', () => {
+    it('should physically delete the row', async () => {
+      mockRun.mockResolvedValueOnce({ changes: 1 });
+
+      const result = await BaseService.hardDelete('audit_plans', 1);
 
       expect(result).toBe(true);
       expect(mockPrepare).toHaveBeenCalledWith(
@@ -340,65 +525,72 @@ describe('BaseService', () => {
 
   describe('sanitizeBody', () => {
     it('should convert empty string to null for fields ending with _id', async () => {
-      // sanitizeBody is protected, so we test it indirectly through create
-      // But we can access it via a workaround using update which also calls sanitizeBody
+      // sanitizeBody is protected, so we test it indirectly through update using
+      // whitelisted _id columns of the target table.
       mockGet.mockResolvedValueOnce({ id: 1 });
 
-      const data = { department_id: '', category_id: '', title: 'Test' };
+      const data = { plan_id: '', program_id: '', title: 'Test' };
 
-      const result = await BaseService.update('audit_plans', 1, data);
+      const result = await BaseService.update('audit_tasks', 1, data);
 
-      expect(result.department_id).toBeNull();
-      expect(result.category_id).toBeNull();
+      expect(result.plan_id).toBeNull();
+      expect(result.program_id).toBeNull();
     });
 
     it('should leave non-empty _id fields unchanged', async () => {
       mockGet.mockResolvedValueOnce({ id: 1 });
 
-      const data = { department_id: 'dept-123', title: 'Test' };
+      const data = { plan_id: 'plan-123', title: 'Test' };
 
-      const result = await BaseService.update('audit_plans', 1, data);
+      const result = await BaseService.update('audit_tasks', 1, data);
 
-      expect(result.department_id).toBe('dept-123');
+      expect(result.plan_id).toBe('plan-123');
     });
 
     it('should leave non-_id fields unchanged even if empty', async () => {
       mockGet.mockResolvedValueOnce({ id: 1 });
 
-      const data = { title: '', description: '' };
+      const data = { title: '', audit_type: '' };
 
-      const result = await BaseService.update('audit_plans', 1, data);
+      const result = await BaseService.update('audit_tasks', 1, data);
 
       expect(result.title).toBe('');
-      expect(result.description).toBe('');
+      expect(result.audit_type).toBe('');
     });
   });
 
   describe('logAudit', () => {
-    it('should insert audit trail record with hash chaining', async () => {
-      mockGet.mockResolvedValueOnce({ hash: 'previous-hash' });
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 1, changes: 1 });
-
+    it('should delegate to the single canonical AuditChainService.append', async () => {
       await BaseService.logAudit('admin', 'create', 'AuditPlan', 'Created plan');
 
-      // Verify the audit trail insert was called
-      const insertCalls = mockPrepare.mock.calls.filter(
+      // logAudit must delegate to the one canonical hash-chain writer rather
+      // than running its own inline INSERT INTO audit_trail (Req 7.1, 27.1).
+      expect(mockAuditAppend).toHaveBeenCalledTimes(1);
+      expect(mockAuditAppend).toHaveBeenCalledWith({
+        user: 'admin',
+        action: 'create',
+        module: 'AuditPlan',
+        details: 'Created plan',
+      });
+
+      // The duplicated inline writer is gone: BaseService itself must not issue
+      // any audit_trail INSERT directly.
+      const directInserts = mockPrepare.mock.calls.filter(
         (call: any[]) => call[0]?.includes('INSERT INTO audit_trail')
       );
-      expect(insertCalls.length).toBeGreaterThan(0);
+      expect(directInserts.length).toBe(0);
     });
 
-    it('should use "0" as previous hash when no prior records exist', async () => {
-      mockGet.mockResolvedValueOnce(null); // No previous hash
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 1, changes: 1 });
+    it('should swallow append failures and not crash the caller', async () => {
+      mockAuditAppend.mockRejectedValueOnce(new Error('append failed'));
 
-      await BaseService.logAudit('admin', 'create', 'AuditPlan', 'First entry');
+      // The primary operation logging is a side effect; a write failure must not
+      // propagate out of BaseService.logAudit.
+      await expect(
+        BaseService.logAudit('admin', 'create', 'AuditPlan', 'First entry')
+      ).resolves.toBeUndefined();
 
-      // Verify run was called (audit was inserted)
-      expect(mockRun).toHaveBeenCalled();
-      // The previous_hash parameter should be '0'
-      const runArgs = mockRun.mock.calls[0];
-      expect(runArgs).toContain('0');
+      expect(mockAuditAppend).toHaveBeenCalledTimes(1);
     });
   });
 });

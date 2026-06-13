@@ -282,7 +282,7 @@ export class CorrespondenceService {
 
   static async getOutgoing(page = 1, pageSize = 10) {
     const offset = (page - 1) * pageSize;
-    const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM outgoing_letters`).get();
+    const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM outgoing_letters`).get<{ total: number }>();
     const total = countRes?.total || 0;
 
     const data = await this.db.prepare("SELECT id, sequence_number, letter_date, recipient_entity, subject, classification, sending_method, status, is_archived, created_at, updated_at, created_by FROM outgoing_letters ORDER BY created_at DESC LIMIT ? OFFSET ?").all(pageSize, offset);

@@ -9,6 +9,8 @@ import { db } from '../../db/index';
 import { AuthError } from '../../utils/errors';
 import logger from '../../utils/logger';
 import { generateCsrfToken, attachCsrfToken } from '../../middleware/csrf';
+import { hashRefreshToken } from '../../services/refreshTokenHash';
+import { getRefreshCookiePath } from '../../services/refreshCookiePath';
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -68,11 +70,13 @@ async function issueFullTokens(userId: string, jwtPrivateKey: string, req: any, 
     { algorithm: 'RS256', expiresIn: '8h' }
   );
 
-  // Store refresh token
+  // Store refresh token (hash only at rest — Req 17.1, 17.5). Compute the hash before
+  // persistence so a hashing failure aborts the insert without storing plaintext.
   const refreshExpiry = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 hours
+  const refreshTokenHash = hashRefreshToken(refreshToken);
   await db.prepare(
     'INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES (?::text, ?::uuid, ?::timestamp)'
-  ).run(refreshToken, userId, refreshExpiry.toISOString());
+  ).run(refreshTokenHash, userId, refreshExpiry.toISOString());
 
   // Set cookies (same pattern as login)
   const isProduction = process.env.NODE_ENV === 'production';
@@ -92,7 +96,7 @@ async function issueFullTokens(userId: string, jwtPrivateKey: string, req: any, 
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? 'none' : 'lax',
-    path: '/api/auth/refresh',
+    path: getRefreshCookiePath(),
     maxAge: 8 * 60 * 60 * 1000, // 8 hours
   });
 

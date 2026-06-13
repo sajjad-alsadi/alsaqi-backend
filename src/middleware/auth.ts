@@ -1,11 +1,69 @@
 import jwt from 'jsonwebtoken';
 import { rateLimit } from 'express-rate-limit';
+import type { Request, Response, NextFunction } from 'express';
+import type { IDBWrapper } from '../db/index.js';
 import { UserRole } from '@alsaqi/shared';
 import { PermissionService } from '../services/PermissionService';
 import { ModuleRegistry } from '../permissions/registry';
 import { PermissionAction } from '../permissions/types';
+import { AuthenticatedRequest } from '../types';
+import { canonicalizePath, isPathAllowed } from './pathGate.js';
 import { redisManager } from '../cache/redisManager.js';
+import { AuthCacheInvalidator } from '../services/AuthCacheInvalidator';
 import logger from '../utils/logger.js';
+import { getAuthRateLimitMax, getAuthRateLimitWindowS } from '../config/environmentConfig.js';
+
+/**
+ * Routes a user must still reach while `requires_password_change` is true so they
+ * can resolve the required change (Req 3.6).
+ *
+ * NOTE: These are canonical `req.path` values, which are router-relative because
+ * `authenticate` runs as route-level middleware nested under `/api/v1/auth`. For
+ * example the change-password route surfaces as `/change-password` (not
+ * `/auth/change-password`); matching the prefixed form here would lock the user
+ * out of the very route that resolves the gate. The gate compares against
+ * `req.path` only — never `req.originalUrl` or any query string (Req 3.2).
+ */
+const PASSWORD_CHANGE_ALLOWED_PATHS: readonly string[] = [
+  '/change-password',
+  '/update-password',
+  '/logout',
+  '/refresh',
+  '/session',
+];
+
+/**
+ * Path-safe password-change gate (Requirement 3).
+ *
+ * Gates strictly on the canonical `req.path` (Req 3.2, 3.3) using exact or
+ * path-segment-boundary prefix matching (Req 3.1, 3.4) so that crafted query
+ * strings (Req 3.5) and lookalike paths such as `/logout-evil` cannot bypass it.
+ * A non-allowed route is denied with a `PASSWORD_CHANGE_REQUIRED` response.
+ *
+ * Typed with `AuthenticatedRequest`/`Response`/`NextFunction` to satisfy the
+ * typed-handler requirement for the auth-middleware gate (Req 26.2).
+ */
+const passwordChangeGate = (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): void => {
+  if (!req.user.requires_password_change) {
+    next();
+    return;
+  }
+
+  const canonicalPath = canonicalizePath(req.path);
+  if (isPathAllowed(canonicalPath, PASSWORD_CHANGE_ALLOWED_PATHS)) {
+    next();
+    return;
+  }
+
+  res.status(403).json({
+    error: 'Password change required',
+    code: 'PASSWORD_CHANGE_REQUIRED',
+  });
+};
 
 /**
  * Redis-backed auth cache for distributed multi-instance deployments.
@@ -26,33 +84,15 @@ const AUTH_CACHE_TTL_SECONDS = 300; // ≤ 300 seconds (Requirement 2.2)
 /**
  * Invalidate all cache entries for a specific user.
  * Call after role/permission/status changes.
- * In Redis, entries are keyed by session_version so a version bump
- * naturally invalidates old entries. This function is kept for explicit
- * invalidation when needed (e.g., status change without version bump).
+ *
+ * Delegates to the canonical {@link AuthCacheInvalidator.invalidate}, which
+ * clears both the in-process permission cache and the distributed Redis auth
+ * cache, retries on failure, and forces an authoritative re-read when all
+ * attempts fail (Requirement 16). Retained as a named export for backward
+ * compatibility with existing callers.
  */
 export const invalidateUserCache = async (userId: string): Promise<void> => {
-  if (!redisManager.isAvailable) {
-    return;
-  }
-
-  try {
-    const client = redisManager.getClient();
-    if (!client) return;
-
-    // Scan for keys matching this user's pattern and delete them
-    const pattern = `${AUTH_CACHE_PREFIX}*_${userId}_*`;
-    let cursor = '0';
-    do {
-      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-      cursor = nextCursor;
-      if (keys.length > 0) {
-        await client.del(...keys);
-      }
-    } while (cursor !== '0');
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    logger.warn(`[AuthCache] Failed to invalidate cache for user ${userId}: ${errorMessage}`);
-  }
+  await AuthCacheInvalidator.invalidate(userId);
 };
 
 /**
@@ -83,7 +123,7 @@ export const clearPermissionCache = async (): Promise<void> => {
   }
 };
 
-export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KEY: string) => {
+export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PUBLIC_KEY: string) => {
   /**
    * Get data from Redis cache or fall back to DB fetcher.
    * If Redis is unavailable, directly calls the fetcher (no-cache mode).
@@ -91,11 +131,12 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
    *
    * Validates: Requirements 2.2, 2.4
    */
-  const getCachedOrDb = async (key: string, fetcher: () => Promise<any>) => {
+  const getCachedOrDb = async <T>(key: string, fetcher: () => Promise<T>, forceFresh = false): Promise<T> => {
     const redisKey = `${AUTH_CACHE_PREFIX}${key}`;
 
-    // Attempt to read from Redis cache
-    if (redisManager.isAvailable) {
+    // Attempt to read from Redis cache. Skipped entirely when a forced
+    // authoritative re-read has been requested for this user (Req 16.3, 16.4).
+    if (!forceFresh && redisManager.isAvailable) {
       try {
         const cached = await redisManager.get(redisKey);
         if (cached !== null) {
@@ -124,7 +165,7 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
     return data;
   };
 
-  const authenticate = async (req: any, res: any, next: any) => {
+  const authenticate = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     let token = req.cookies.token;
     
     // Also check Authorization header
@@ -141,16 +182,40 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
     
     try {
       const decodedToken = jwt.verify(token, JWT_PUBLIC_KEY, { algorithms: ['RS256'] }) as any;
-      
-      const user = await getCachedOrDb(`user_${decodedToken.id}_${decodedToken.session_version}`, async () => {
-        return await db.prepare(`
-          SELECT u.id, u.role, u.status, u.username, u.name, u.email, u.session_version, u.requires_password_change, o.id as department_id
-          FROM users u
-          LEFT JOIN org_entities o ON (u.department = o.name_ar OR u.department = o.name_en)
-          WHERE u.id = ?
-        `).get(decodedToken.id) as any;
-      });
-      
+
+      // If a prior cache invalidation for this user failed, bypass the cache and
+      // re-read the authoritative store on this request (Req 16.3, 16.4).
+      const forceFresh = AuthCacheInvalidator.shouldForceRead(decodedToken.id);
+
+      let user: any;
+      try {
+        user = await getCachedOrDb(`user_${decodedToken.id}_${decodedToken.session_version}`, async () => {
+          return await db.prepare(`
+            SELECT u.id, u.role, u.status, u.username, u.name, u.email, u.session_version, u.requires_password_change, o.id as department_id
+            FROM users u
+            LEFT JOIN org_entities o ON (u.department = o.name_ar OR u.department = o.name_en)
+            WHERE u.id = ?
+          `).get(decodedToken.id) as any;
+        }, forceFresh);
+      } catch (storeErr) {
+        // Req 16.5: the authoritative store could not be reached while re-reading
+        // the (possibly invalidated) auth state. Deny the request rather than
+        // serving stale cached values.
+        const message = storeErr instanceof Error ? storeErr.message : String(storeErr);
+        logger.error(
+          `[Auth] Authoritative store unreachable while verifying auth state for user ${decodedToken.id}: ${message}`,
+        );
+        return res.status(503).json({
+          error: 'Authentication state could not be verified',
+          code: 'AUTH_STATE_UNVERIFIABLE',
+        });
+      }
+
+      // A successful authoritative read clears any forced-re-read flag (Req 16.4).
+      if (forceFresh) {
+        AuthCacheInvalidator.clearForceRead(decodedToken.id);
+      }
+
       if (!user) {
         return res.status(401).json({ error: "User not found in database" });
       }
@@ -173,20 +238,9 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
         requires_password_change: !!user.requires_password_change 
       };
 
-      // If password change is required, only allow access to password-related auth routes
-      if (req.user.requires_password_change) {
-        const url = req.originalUrl;
-        const allowedPaths = ['/auth/change-password', '/auth/update-password', '/auth/logout', '/auth/refresh', '/auth/session'];
-        const isAllowed = allowedPaths.some(path => url.includes(path));
-        if (!isAllowed) {
-          return res.status(403).json({ 
-            error: "Password change required", 
-            code: "PASSWORD_CHANGE_REQUIRED" 
-          });
-        }
-      }
-
-      next();
+      // If password change is required, only allow access to a small set of
+      // routes (canonical `req.path` match only) so the user can resolve it (Req 3).
+      return passwordChangeGate(req as AuthenticatedRequest, res, next);
     } catch (err) {
       if (!(err instanceof jwt.TokenExpiredError) && !(err instanceof jwt.JsonWebTokenError)) {
         console.error("Auth error:", err);
@@ -222,7 +276,7 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
         );
       }
       // In production, return a middleware that always responds with 500
-      return (req: any, res: any, _next: any) => {
+      return (req: AuthenticatedRequest, res: Response, _next: NextFunction) => {
         console.error(`checkPermission: Unregistered module '${module}' used in route middleware.`);
         return res.status(500).json({
           error: 'Internal authorization configuration error',
@@ -230,7 +284,7 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
       };
     }
 
-    return async (req: any, res: any, next: any) => {
+    return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
       // Req 3.6, 3.8: Ensure authenticate() has populated req.user
       if (!req.user) {
         return res.status(401).json({
@@ -276,7 +330,7 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
    * It will be removed once all routes are migrated to checkPermission().
    */
   const authorize = (allowedRoles: readonly string[]) => {
-    return (req: any, res: any, next: any) => {
+    return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
       if (!allowedRoles.includes(req.user.role)) {
         return res.status(403).json({ error: "Forbidden: Insufficient permissions" });
       }
@@ -284,17 +338,37 @@ export const createAuthMiddlewares = (db: any, JWT_SECRET: string, JWT_PUBLIC_KE
     };
   };
 
+  // Source-IP rate limiting (Requirement 18).
+  // Keyed on the source IP **only** so attempts are counted across usernames,
+  // throttling password-spraying from a single source (Req 18.1). The limit and
+  // window are configurable via AUTH_RATE_LIMIT_MAX (default 10) and
+  // AUTH_RATE_LIMIT_WINDOW_S (default 900s). As route-level middleware, it runs
+  // before the login handler so over-limit attempts are rejected without ever
+  // evaluating the supplied credentials (Req 18.2, 18.3); the rejection response
+  // includes the seconds remaining until the window resets (Req 18.4). Window
+  // expiry resets the counter automatically.
+  const authRateLimitWindowMs = getAuthRateLimitWindowS() * 1000;
   const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10, // Limit each IP+username combination to 10 login requests per windowMs
-    message: { error: "TOO_MANY_ATTEMPTS" },
+    windowMs: authRateLimitWindowMs,
+    max: getAuthRateLimitMax(),
+    message: { error: 'TOO_MANY_ATTEMPTS' },
     standardHeaders: true,
     legacyHeaders: false,
     validate: { keyGeneratorIpFallback: false },
-    // Key by IP + username so that blocking one user doesn't affect others
-    keyGenerator: (req: any) => {
-      const username = (req.body && req.body.usernameOrEmail) ? String(req.body.usernameOrEmail).toLowerCase() : 'unknown';
-      return `${req.ip || 'no-ip'}_${username}`;
+    // Key by source IP only so blocking is per-source and counted across usernames (Req 18.1).
+    keyGenerator: (req: Request) => req.ip || 'no-ip',
+    // Reject over-limit attempts without evaluating credentials and report the
+    // seconds remaining until the source IP may resume attempts (Req 18.2-18.4).
+    handler: (req: Request, res: Response) => {
+      const resetTime: Date | undefined = req.rateLimit?.resetTime;
+      const retryAfterSeconds = resetTime
+        ? Math.max(0, Math.ceil((resetTime.getTime() - Date.now()) / 1000))
+        : Math.ceil(authRateLimitWindowMs / 1000);
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      res.status(429).json({
+        error: 'TOO_MANY_ATTEMPTS',
+        retryAfterSeconds,
+      });
     },
   });
 

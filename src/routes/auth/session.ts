@@ -5,6 +5,7 @@ import { AuthService } from '../../services/AuthService';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { AuthError } from '../../utils/errors';
 import { generateCsrfToken, attachCsrfToken } from '../../middleware/csrf';
+import { getRefreshCookiePath } from '../../services/refreshCookiePath';
 
 export const createSessionRoutes = (
   db: any,
@@ -76,7 +77,7 @@ export const createSessionRoutes = (
         httpOnly: true,
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
-        path: '/api/auth/refresh', // Restrict cookie path
+        path: getRefreshCookiePath(), // Restrict cookie to the configured refresh endpoint path (Req 19.1)
         maxAge: result.rememberMe ? 30 * 24 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000 // 30 days or 8 hours in ms
       });
 
@@ -96,7 +97,7 @@ export const createSessionRoutes = (
       // Clear cookies with same options
       const isProduction = process.env.NODE_ENV === 'production';
       const clearOptions: any = { httpOnly: true, secure: isProduction, sameSite: isProduction ? 'none' : 'lax', path: '/' };
-      const refreshClearOptions: any = { ...clearOptions, path: '/api/auth/refresh' };
+      const refreshClearOptions: any = { ...clearOptions, path: getRefreshCookiePath() };
       res.clearCookie('refreshToken', refreshClearOptions);
       res.clearCookie('token', clearOptions);
       throw error;
@@ -115,7 +116,7 @@ export const createSessionRoutes = (
     // Clear cookies with same options
     const isProduction = process.env.NODE_ENV === 'production';
     const clearOptions: any = { httpOnly: true, secure: isProduction, sameSite: isProduction ? 'none' : 'lax', path: '/' };
-    const refreshClearOptions: any = { ...clearOptions, path: '/api/auth/refresh' };
+    const refreshClearOptions: any = { ...clearOptions, path: getRefreshCookiePath() };
     res.clearCookie('refreshToken', refreshClearOptions);
     res.clearCookie('token', clearOptions);
     res.json({ success: true });

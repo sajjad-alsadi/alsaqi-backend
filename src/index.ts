@@ -183,11 +183,17 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   // ─── start() ────────────────────────────────────────────────────────────────
 
   async function start(): Promise<void> {
+    // Fail-fast configuration assertion (Req 9.1, 9.2): verify the dedicated
+    // FILE_ACCESS_SECRET is present and at least 32 characters BEFORE binding the
+    // port. assertConfigured logs a fatal error and exits with a non-zero code
+    // when the secret is unset/whitespace-only or too short.
+    const { SecureFileService } = await import('./services/SecureFileService.js');
+    SecureFileService.assertConfigured();
+
     // Initialize database connection and run pending migrations
     const { initDb, db } = await import('./db/index.js');
-    const { runMigrations } = await import('./db/migrations.js');
+    const { runMigrations, versionedMigrations } = await import('./db/migrations.js');
     const { MigrationRunner } = await import('./db/migrationRunner.js');
-    const { versionedMigrations } = await import('./db/versionedMigrations.js');
 
     await initDb();
     await runMigrations();

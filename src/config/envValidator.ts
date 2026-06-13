@@ -177,9 +177,10 @@ export const ENV_VAR_DEFINITIONS: EnvVarDefinition[] = [
   },
   {
     name: 'FILE_ACCESS_SECRET',
-    required: false,
+    required: true,
     type: 'string',
-    description: 'Secret for signing file access URLs (falls back to JWT_SECRET)',
+    minLength: 32,
+    description: 'Dedicated secret for signing/verifying file-access URLs (required, minimum 32 characters, no JWT_SECRET fallback)',
     category: 'encryption',
   },
 

@@ -15,7 +15,7 @@ export { createCorrelationIdMiddleware, correlationIdMiddleware, isValidUuid } f
 export { createResponseWrapper, responseWrapperMiddleware } from './responseWrapper.js';
 export { createCompressionMiddleware } from './compression.js';
 export { createHelmetMiddleware } from './helmet.js';
-export { globalErrorHandler, sanitizeErrorMessage } from './error.js';
+export { globalErrorHandler, sanitizeErrorMessage, sanitizeErrorForClient, CLIENT_ERROR_FIELD_ALLOWLIST } from './error.js';
 export { notFoundHandler } from './notFoundHandler.js';
 export {
   apiVersionHeader,

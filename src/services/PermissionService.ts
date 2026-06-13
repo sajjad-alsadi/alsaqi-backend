@@ -1,6 +1,7 @@
 import { db } from '../db/index';
 import { ModuleRegistry } from '../permissions/registry';
 import { permissionCache } from './PermissionCache';
+import { AuthCacheInvalidator } from './AuthCacheInvalidator';
 import {
   PermissionAction,
   PermissionUpdate,
@@ -279,8 +280,10 @@ export class PermissionService {
         .run(userId, permRecord.id, isAllowed);
     }
 
-    // Invalidate cache for this user
-    this.invalidateCache(userId);
+    // Invalidate the full cached auth state (permission + Redis auth cache) for
+    // this user via the canonical invalidator so a permission-set change takes
+    // effect within 1 second (Req 16.2).
+    await AuthCacheInvalidator.invalidate(userId);
   }
 
   /**
@@ -371,8 +374,11 @@ export class PermissionService {
       .prepare('SELECT id FROM users WHERE role_id = ?')
       .all(roleId)) as Array<{ id: string }>;
 
+    // Route each affected user through the canonical invalidator so both the
+    // permission cache and the distributed Redis auth cache are cleared with
+    // retry semantics when a role's permissions change (Req 16.2, 16.4).
     for (const user of users) {
-      this.cache.invalidateUser(user.id);
+      await AuthCacheInvalidator.invalidate(user.id);
     }
   }
 }

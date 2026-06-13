@@ -7,12 +7,54 @@
 import { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { ErrorCodes } from '@alsaqi/shared';
+import logger from '../utils/logger.js';
 
 /**
  * Determines if the application is running in production mode.
  */
 function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
+}
+
+/**
+ * Statically defined field-name allowlist for client-facing error objects (default-deny).
+ *
+ * Only fields whose names appear in this list are ever forwarded to clients. Every other
+ * field — including ones that reference database tables/columns, SQL fragments, stack traces,
+ * file-system paths, or internal hostnames, and including identifiers introduced after these
+ * rules were authored — is omitted because it is absent from the allowlist rather than because
+ * it matches a list of known-internal terms (Req 24.1, 24.2, 24.3, 24.4).
+ */
+export const CLIENT_ERROR_FIELD_ALLOWLIST: readonly string[] = [
+  'code',
+  'message',
+  'traceId',
+  'field',
+  'errors',
+] as const;
+
+/**
+ * Returns a new object containing only the allowlisted fields of `error` (default-deny).
+ *
+ * This is a pure function: it never mutates its input and performs no I/O. Any field whose
+ * name is not a member of {@link CLIENT_ERROR_FIELD_ALLOWLIST} is excluded regardless of its
+ * value or origin (Req 24.1, 24.2). Because inclusion is driven solely by membership in the
+ * static allowlist, fields referencing newly introduced tables/columns/identifiers are
+ * excluded automatically (Req 24.4).
+ */
+export function sanitizeErrorForClient(
+  error: Record<string, unknown>
+): Record<string, unknown> {
+  const allowed = new Set<string>(CLIENT_ERROR_FIELD_ALLOWLIST);
+  const sanitized: Record<string, unknown> = {};
+
+  for (const key of Object.keys(error)) {
+    if (allowed.has(key)) {
+      sanitized[key] = error[key];
+    }
+  }
+
+  return sanitized;
 }
 
 /**
@@ -138,26 +180,44 @@ export const globalErrorHandler = (err: any, req: Request, res: Response, _next:
     }
   }
 
-  // Log the error server-side
+  // Preserve the complete, unsanitized error detail server-side so that no diagnostic
+  // information is lost when the client-facing response is sanitized (Req 24.5).
+  const serverLogDetail = {
+    method: req.method,
+    url: req.originalUrl,
+    statusCode,
+    errorCode,
+    message: err.message,
+    details: err.details,
+    code: err.code,
+    constraint: err.constraint,
+    column: err.column,
+    table: err.table,
+    stack: err.stack,
+  };
+
   if (statusCode >= 500) {
-    console.error(`[${traceId}] ${message}`, {
-      method: req.method,
-      url: req.originalUrl,
-      stack: err.stack,
-    });
+    logger.error(`[${traceId}] ${message}`, serverLogDetail);
+  } else {
+    logger.warn(`[${traceId}] ${message}`, serverLogDetail);
   }
 
   // Build the response based on environment
   if (isProduction()) {
     const productionMessage = getProductionMessage(statusCode, errorCode, message);
+    // Default-deny field sanitization: spread the raw error so any internal fields it carries
+    // (table/column names, SQL fragments, paths, etc.) are candidates, then keep only the
+    // allowlisted field names. The category-safe code/message/traceId override raw values.
+    const clientError = sanitizeErrorForClient({
+      ...(err as Record<string, unknown>),
+      code: errorCode,
+      message: productionMessage,
+      traceId,
+    });
     res.status(statusCode).json({
       success: false,
       data: null,
-      error: {
-        code: errorCode,
-        message: productionMessage,
-        traceId,
-      },
+      error: clientError,
       meta: {
         requestId: traceId,
         timestamp: new Date().toISOString(),

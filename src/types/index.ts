@@ -16,7 +16,9 @@ export interface ApiUser {
   email?: string;
   role: string;
   department?: string;
+  department_id?: string | null;
   session_version?: number;
+  requires_password_change?: boolean;
 }
 
 export interface AuthenticatedRequest extends Request {

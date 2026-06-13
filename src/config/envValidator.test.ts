@@ -37,6 +37,7 @@ function createValidProductionEnv(): Record<string, string> {
     JWT_SECRET: 'a'.repeat(64),
     VITE_STORAGE_SECRET: 'b'.repeat(32),
     VITE_NETWORK_SECRET: 'strong-network-hmac-secret-value-here',
+    FILE_ACCESS_SECRET: 'c'.repeat(32),
     CORS_ORIGIN: 'https://app.example.com',
     REDIS_URL: 'redis://redis.example.com:6379',
     UPLOAD_DIR: '/app/uploads',

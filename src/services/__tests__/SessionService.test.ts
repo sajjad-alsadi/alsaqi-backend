@@ -30,6 +30,7 @@ vi.mock('jsonwebtoken', () => ({
 
 import { SessionService } from '../SessionService';
 import { AuthError } from '../../utils/errors';
+import { hashRefreshToken } from '../refreshTokenHash';
 
 describe('SessionService', () => {
   let mockGet: ReturnType<typeof vi.fn>;
@@ -97,11 +98,11 @@ describe('SessionService', () => {
 
       await SessionService.refresh('old-refresh-token', JWT_SECRET, JWT_PRIVATE_KEY);
 
-      // Should update user_sessions with new refresh token
+      // Should update user_sessions with new refresh token (hash stored at rest, Req 17.1)
       expect(mockPrepare).toHaveBeenCalledWith(
         expect.stringContaining('UPDATE user_sessions SET refresh_token')
       );
-      expect(mockRun).toHaveBeenCalledWith('new-refresh-token', mockSession.id);
+      expect(mockRun).toHaveBeenCalledWith(hashRefreshToken('new-refresh-token'), mockSession.id);
 
       // Should update refresh_tokens table with new token
       expect(mockPrepare).toHaveBeenCalledWith(
@@ -247,7 +248,8 @@ describe('SessionService', () => {
       expect(mockPrepare).toHaveBeenCalledWith(
         expect.stringContaining("SET status = 'LoggedOut'")
       );
-      expect(mockRun).toHaveBeenCalledWith('valid-refresh-token');
+      // Lookup/update use the token HASH, never the plaintext (Req 17.1, 17.2)
+      expect(mockRun).toHaveBeenCalledWith(hashRefreshToken('valid-refresh-token'));
     });
 
     it('revokes the token in refresh_tokens table for compatibility', async () => {

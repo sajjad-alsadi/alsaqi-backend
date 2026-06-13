@@ -31,37 +31,47 @@ let capturedInserts: Array<{
 }> = [];
 
 // Mock the database module
-vi.mock('../../db/index', () => ({
-  db: {
-    prepare: vi.fn().mockImplementation((sql: string) => {
-      if (sql.includes('SELECT hash FROM audit_trail')) {
-        return {
-          get: vi.fn().mockResolvedValue(null),
-        };
-      }
-      if (sql.includes('INSERT INTO audit_trail')) {
-        return {
-          run: vi.fn().mockImplementation((...args: any[]) => {
-            capturedInserts.push({
-              user: args[0],
-              action: args[1],
-              module: args[2],
-              details: args[3],
-              hash: args[4],
-              previousHash: args[5],
-              timestamp: args[6],
-            });
-            return Promise.resolve({ lastInsertRowid: 1 });
-          }),
-        };
-      }
+vi.mock('../../db/index', () => {
+  const prepare = vi.fn().mockImplementation((sql: string) => {
+    if (sql.includes('SELECT hash FROM audit_trail')) {
       return {
         get: vi.fn().mockResolvedValue(null),
-        run: vi.fn().mockResolvedValue({}),
       };
-    }),
-  },
-}));
+    }
+    if (sql.includes('INSERT INTO audit_trail')) {
+      return {
+        run: vi.fn().mockImplementation((...args: any[]) => {
+          capturedInserts.push({
+            user: args[0],
+            action: args[1],
+            module: args[2],
+            details: args[3],
+            hash: args[4],
+            previousHash: args[5],
+            timestamp: args[6],
+          });
+          return Promise.resolve({ lastInsertRowid: 1 });
+        }),
+      };
+    }
+    return {
+      get: vi.fn().mockResolvedValue(null),
+      run: vi.fn().mockResolvedValue({}),
+    };
+  });
+
+  return {
+    db: {
+      // logAudit now delegates to AuditChainService.append, which wraps the
+      // read-prev-hash -> compute -> insert in a single transaction. The mock
+      // transaction simply executes the critical section inline.
+      isExternal: false,
+      transaction: vi.fn().mockImplementation(async (fn: Function) => fn()),
+      exec: vi.fn().mockResolvedValue(undefined),
+      prepare,
+    },
+  };
+});
 
 // Import BaseService after mocks are set up
 import { BaseService } from '../BaseService';

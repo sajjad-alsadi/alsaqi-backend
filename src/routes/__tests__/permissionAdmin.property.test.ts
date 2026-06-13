@@ -56,6 +56,19 @@ vi.mock('../../permissions/registry', () => ({
   },
 }));
 
+// Mock AuthCacheInvalidator — the canonical auth-cache invalidation path the
+// override route now calls (`AuthCacheInvalidator.invalidate(userId)`, Req 16.2/16.4),
+// replacing the old `PermissionService.invalidateCache` path.
+const authCacheInvalidateMock = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../services/AuthCacheInvalidator', () => ({
+  AuthCacheInvalidator: {
+    invalidate: (...args: any[]) => authCacheInvalidateMock(...args),
+    shouldForceRead: vi.fn().mockReturnValue(false),
+    clearForceRead: vi.fn(),
+    _reset: vi.fn(),
+  },
+}));
+
 import { createPermissionAdminRoutes } from '../permissionAdmin';
 import { PermissionAction } from '../../permissions/types';
 
@@ -512,7 +525,7 @@ describe('Property 18: Override Validation', () => {
           expect(res.status).toBe(200);
           expect(res.body.message).toContain('updated successfully');
           expect(res.body.userId).toBe(userId);
-          expect(invalidateCacheMock).toHaveBeenCalledWith(userId);
+          expect(authCacheInvalidateMock).toHaveBeenCalledWith(userId);
         }
       ),
       { numRuns: 50 }
@@ -555,7 +568,7 @@ describe('Property 18: Override Validation', () => {
 
           expect(res.status).toBe(400);
           expect(res.body.code).toBe('VALIDATION_ERROR');
-          expect(invalidateCacheMock).not.toHaveBeenCalled();
+          expect(authCacheInvalidateMock).not.toHaveBeenCalled();
         }
       ),
       { numRuns: 50 }
@@ -593,7 +606,7 @@ describe('Property 18: Override Validation', () => {
 
           expect(res.status).toBe(400);
           expect(res.body.code).toBe('VALIDATION_ERROR');
-          expect(invalidateCacheMock).not.toHaveBeenCalled();
+          expect(authCacheInvalidateMock).not.toHaveBeenCalled();
         }
       ),
       { numRuns: 30 }

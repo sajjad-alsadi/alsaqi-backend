@@ -1,33 +1,59 @@
 import { db } from '../db/index';
 import { NotFoundError, ValidationError } from '../utils/errors';
 import { AppCodeGenerator } from '../utils/AppCodeGenerator';
-import { N8nService } from '../utils/n8nService';
+import { enqueueEvent } from './transactionalEvents';
 import { computePaginationMeta } from '../utils/paginationService';
-import crypto from 'crypto';
+import { checkWhitelist } from './columnWhitelist';
+import { buildSearchClause } from './searchColumns';
+import { isKeysetTable, keysetPaginate, clampKeysetPageSize } from '../utils/cursorPagination';
+import { getCachedCount, buildCountCacheKey } from './countCache';
+import { AuditChainService } from './AuditChainService';
 
 export class BaseService {
   protected static db = db;
 
+  /**
+   * Tables that carry a `deleted_at` column and therefore participate in the
+   * soft-delete model (derived from `database/schema.sql`). For these tables the
+   * default {@link delete} path performs an `UPDATE ... SET deleted_at = now()`
+   * rather than a physical `DELETE` (Req 25.1). Tables not listed here have no
+   * `deleted_at` column and can only be removed physically.
+   */
+  static readonly SOFT_DELETE_TABLES: ReadonlySet<string> = new Set<string>([
+    'audit_programs',
+    'audit_plans',
+    'risk_register',
+    'compliance_items',
+    'audit_tasks',
+    'audit_findings',
+    'recommendations',
+    'audit_evidence',
+    'audit_reports',
+    'fraud_log',
+    'incoming_correspondence',
+    'outgoing_correspondence',
+    'correspondence_attachments',
+  ]);
+
+  /** Whether the given table has a `deleted_at` column (soft-delete capable). */
+  static hasSoftDelete(tableName: string): boolean {
+    return BaseService.SOFT_DELETE_TABLES.has(tableName);
+  }
+
+  /**
+   * Appends an audit-trail entry. Delegates to the single canonical hash-chain
+   * writer, {@link AuditChainService.append} (Requirement 7.1, 27.1, 27.4) —
+   * the duplicated inline hash-chain writer that previously lived here has been
+   * removed so exactly one audit-append implementation remains.
+   *
+   * The previous behavior of this method was to swallow write failures and log
+   * them rather than propagate, so callers (audit logging is a side effect of a
+   * primary operation) are never crashed by an audit-write failure. That
+   * non-crashing behavior is preserved here.
+   */
   static async logAudit(username: string, action: string, module: string, details: string) {
     try {
-      const timestamp = new Date().toISOString();
-      
-      // Hash chaining for tamper-evident audit trail
-      let previousHash = '0';
-      try {
-        const lastRecord = await this.db.prepare("SELECT hash FROM audit_trail WHERE hash IS NOT NULL ORDER BY timestamp DESC LIMIT 1").get() as any;
-        if (lastRecord?.hash) {
-          previousHash = lastRecord.hash;
-        }
-      } catch (e) {
-        // If hash column doesn't exist yet, continue without it
-      }
-      
-      const recordData = `${previousHash}|${username}|${action}|${module}|${details}|${timestamp}`;
-      const hash = crypto.createHash('sha256').update(recordData).digest('hex');
-      
-      await this.db.prepare("INSERT INTO audit_trail (\"user\", action, module, details, hash, previous_hash, timestamp) VALUES (?::text, ?::text, ?::text, ?::text, ?::text, ?::text, ?::timestamp)")
-        .run(username, action, module, details, hash, previousHash, timestamp);
+      await AuditChainService.append({ user: username, action, module, details });
     } catch (error) {
       console.error("[System Log Error] Failed to insert audit trail:", error);
     }
@@ -44,88 +70,113 @@ export class BaseService {
     return sanitized;
   }
 
-  static async findAll(tableName: string, options: { page?: number; pageSize?: number; orderBy?: string; where?: Record<string, any>; select?: string[]; includeDeleted?: boolean } = {}) {
-    const { page = 1, pageSize = 10, orderBy = 'id DESC', where = {}, select, includeDeleted = false } = options;
-    const offset = (page - 1) * pageSize;
+  static async findAll(
+    tableName: string,
+    options: {
+      page?: number;
+      pageSize?: number;
+      orderBy?: string;
+      where?: Record<string, any>;
+      select?: string[];
+      includeDeleted?: boolean;
+      cursor?: string | null;
+      sortDirection?: 'ASC' | 'DESC';
+    } = {}
+  ) {
+    const { page = 1, pageSize, orderBy = 'id DESC', where = {}, select, includeDeleted = false, cursor, sortDirection } = options;
 
     const validatedTable = this.db.validateIdentifier(tableName);
-    
-    // Validate orderBy to prevent SQL injection
-    const orderParts = (orderBy || 'id').trim().split(/\s+/);
-    const orderColumn = orderParts[0] || 'id';
-    const orderDirection = (orderParts[1] || 'DESC').toUpperCase();
-    
-    // Strict regex for column name
-    if (orderColumn && !/^[a-zA-Z0-9_]+$/.test(orderColumn)) {
-      throw new ValidationError(`Invalid orderBy column name: ${orderColumn}`);
-    }
-    // Strict match for direction
-    if (orderDirection !== 'ASC' && orderDirection !== 'DESC') {
-      throw new ValidationError(`Invalid orderBy direction: ${orderDirection}`);
-    }
-    // Final safe orderBy string
-    const safeOrderBy = `${orderColumn} ${orderDirection}`;
 
     // Safe select columns
     const safeSelect = select && select.length > 0
       ? select.filter(s => /^[a-zA-Z0-9_]+$/.test(s)).join(', ')
       : '*';
 
-    let whereClause = '';
-    const whereValues: any[] = [];
+    // Build the where conditions shared by both the offset and keyset paths:
+    // explicit equality filters, soft-delete exclusion, and the configurable
+    // search clause.
     const { search, ...restWhere } = where;
-    const whereKeys = Object.keys(restWhere);
-    
-    if (whereKeys.length > 0) {
-      whereClause = 'WHERE ' + whereKeys.map((key, i) => `${this.db.validateIdentifier(key)} = ?`).join(' AND ');
-      whereValues.push(...Object.values(restWhere));
+    const whereConditions: string[] = [];
+    const whereValues: any[] = [];
+
+    for (const key of Object.keys(restWhere)) {
+      whereConditions.push(`${this.db.validateIdentifier(key)} = ?`);
+      whereValues.push(restWhere[key]);
     }
 
-    // Exclude soft-deleted records from standard queries (Requirement 8.2)
+    // Exclude soft-deleted records from standard queries (Req 25.3).
     if (!includeDeleted) {
-      if (whereClause) {
-        whereClause += ' AND deleted_at IS NULL';
-      } else {
-        whereClause = 'WHERE deleted_at IS NULL';
-      }
+      whereConditions.push('deleted_at IS NULL');
     }
 
-    // Add search functionality if provided
-    if (search && typeof search === 'string' && search.trim() !== '') {
-      const searchPattern = `%${search.trim()}%`;
-      // We'll try to find common text columns to search on based on the table name
-      const searchColumns: Record<string, string[]> = {
-        audit_plans: ['title', 'plan_code', 'department', 'lead_auditor'],
-        audit_tasks: ['title', 'task_number', 'audit_type'],
-        audit_programs: ['program_title', 'program_code', 'audit_area'],
-        audit_findings: ['title', 'description', 'finding_number'],
-        recommendations: ['rec_number', 'department', 'action_plan'],
-        risk_register: ['risk_id', 'description', 'owner'],
-        compliance_items: ['ref_number', 'title', 'notes']
-      };
+    // Configurable, table-scoped search clause. Returns null (no clause) when the
+    // table has no configured search columns or the term is empty/whitespace —
+    // there is NO title/name/description fallback (Req 5.1, 5.2, 5.4).
+    const searchClause = buildSearchClause(tableName, typeof search === 'string' ? search : null);
+    if (searchClause) {
+      whereConditions.push(searchClause.clause);
+      whereValues.push(...searchClause.params);
+    }
 
-      const tableSearchCols = searchColumns[tableName] || ['title', 'name', 'description'].filter(c => c); // Fallback
-      
-      if (tableSearchCols.length > 0) {
-        const searchClause = '(' + tableSearchCols.map(col => `${this.db.validateIdentifier(col)} LIKE ?`).join(' OR ') + ')';
-        if (whereClause) {
-          whereClause += ` AND ${searchClause}`;
-        } else {
-          whereClause = `WHERE ${searchClause}`;
+    const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+
+    // ── Keyset (cursor) pagination for large-table-configured endpoints ──────
+    // (Req 6.1–6.6). The total count comes from a cached/estimated source no
+    // older than 60s rather than a per-request COUNT(*) (Req 6.5).
+    if (isKeysetTable(tableName)) {
+      const additionalWhere = whereConditions.length > 0 ? whereConditions.join(' AND ') : undefined;
+
+      const pageResult = await keysetPaginate(
+        this.db,
+        tableName,
+        { cursor, pageSize, sortDirection },
+        additionalWhere,
+        whereValues,
+        safeSelect
+      );
+
+      const effectivePageSize = clampKeysetPageSize(pageSize);
+      const total = await getCachedCount(
+        buildCountCacheKey(validatedTable, whereClause, whereValues),
+        async () => {
+          const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM ${validatedTable} ${whereClause}`).get(...whereValues);
+          return countRes?.total || 0;
         }
-        tableSearchCols.forEach(() => whereValues.push(searchPattern));
-      }
+      );
+
+      return {
+        data: pageResult.data,
+        nextCursor: pageResult.nextCursor,
+        pagination: computePaginationMeta(page, effectivePageSize, total),
+      };
     }
+
+    // ── Offset/limit pagination (default path for non-large tables) ──────────
+    // Validate orderBy to prevent SQL injection.
+    const orderParts = (orderBy || 'id').trim().split(/\s+/);
+    const orderColumn = orderParts[0] || 'id';
+    const orderDirection = (orderParts[1] || 'DESC').toUpperCase();
+
+    if (orderColumn && !/^[a-zA-Z0-9_]+$/.test(orderColumn)) {
+      throw new ValidationError(`Invalid orderBy column name: ${orderColumn}`);
+    }
+    if (orderDirection !== 'ASC' && orderDirection !== 'DESC') {
+      throw new ValidationError(`Invalid orderBy direction: ${orderDirection}`);
+    }
+    const safeOrderBy = `${orderColumn} ${orderDirection}`;
+
+    const effectiveOffsetPageSize = pageSize ?? 10;
+    const offset = (page - 1) * effectiveOffsetPageSize;
 
     const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM ${validatedTable} ${whereClause}`).get(...whereValues);
     const total = countRes?.total || 0;
 
     const query = `SELECT ${safeSelect} FROM ${validatedTable} ${whereClause} ORDER BY ${safeOrderBy} LIMIT ? OFFSET ?`;
-    const data = await this.db.prepare(query).all(...whereValues, pageSize, offset);
+    const data = await this.db.prepare(query).all(...whereValues, effectiveOffsetPageSize, offset);
 
     return {
       data,
-      pagination: computePaginationMeta(page, pageSize, total)
+      pagination: computePaginationMeta(page, effectiveOffsetPageSize, total)
     };
   }
 
@@ -141,13 +192,21 @@ export class BaseService {
   }
 
   static async create(tableName: string, data: any) {
+    // Mass-assignment prevention (Req 4.1, 4.3, 4.4): reject the ENTIRE request
+    // before touching the database when the body contains any top-level key that
+    // is not in the schema-derived column whitelist for the table. No row is
+    // created and the error names the offending keys. This pure pre-DB check
+    // returns well within the required bound (Req 4.5).
+    const { ok, rejectedKeys } = checkWhitelist(tableName, data ?? {});
+    if (!ok) {
+      throw new ValidationError(
+        `The following fields are not permitted for ${tableName}: ${rejectedKeys.join(', ')}`,
+        { rejectedKeys }
+      );
+    }
+
     return await db.transaction(async () => {
       const body = this.sanitizeBody(data);
-      // Only delete internal fields, ensure plan_code stays if provided
-      const restrictedColumns = ['id', 'created_at', 'updated_at'];
-      restrictedColumns.forEach(col => {
-        if (col in body) delete body[col];
-      });
 
       // Determine relevant code column
       const codeColumns: Record<string, string> = {
@@ -183,27 +242,32 @@ export class BaseService {
       const stmt = this.db.prepare(`INSERT INTO ${validatedTable} (${keys.join(",")}) VALUES (${placeholders})`);
       const info = await stmt.run(...values) as any;
 
-      // --- AUTOMATION: Send event to n8n ---
-      await N8nService.sendEvent(`${tableName}.created`, {
-        id: info.lastInsertRowid,
-        ...body
-      }).catch((e) => console.error("N8n send event failed", e));
+      // --- AUTOMATION: buffer event for dispatch after commit (Req 20.1) ---
+      enqueueEvent({
+        name: `${tableName}.created`,
+        payload: { id: info.lastInsertRowid, ...body },
+      });
 
       return { id: info.lastInsertRowid, ...body };
     });
   }
 
   static async update(tableName: string, id: string | number, data: any) {
+    // Mass-assignment prevention (Req 4.1, 4.3, 4.4): reject the ENTIRE request
+    // before touching the database when the body contains any top-level key that
+    // is not in the schema-derived column whitelist for the table. The existing
+    // target row is left unchanged and the error names the offending keys
+    // (Req 4.3). This pure pre-DB check returns well within the bound (Req 4.5).
+    const { ok, rejectedKeys } = checkWhitelist(tableName, data ?? {});
+    if (!ok) {
+      throw new ValidationError(
+        `The following fields are not permitted for ${tableName}: ${rejectedKeys.join(', ')}`,
+        { rejectedKeys }
+      );
+    }
+
     return await db.transaction(async () => {
       const body = this.sanitizeBody(data);
-      
-      // Strict exclusion of immutable/system fields to prevent Mass Assignment
-      const immutableFields = [
-        'id', 'created_at', 'updated_at', 
-        'plan_code', 'program_code', 'task_number', 'finding_number', 
-        'rec_number', 'risk_id', 'employee_id'
-      ];
-      immutableFields.forEach(col => delete body[col]);
 
       const keys = Object.keys(body).map(k => this.db.validateIdentifier(k));
       const values = Object.values(body);
@@ -223,26 +287,75 @@ export class BaseService {
         throw new NotFoundError(`${tableName} item with ID ${id} not found`);
       }
 
-      // --- AUTOMATION: Send event to n8n ---
-      await N8nService.sendEvent(`${tableName}.updated`, {
-        id,
-        ...body
-      }).catch((e) => console.error("N8n send event failed", e));
+      // --- AUTOMATION: buffer event for dispatch after commit (Req 20.1) ---
+      enqueueEvent({
+        name: `${tableName}.updated`,
+        payload: { id, ...body },
+      });
 
       return { id, ...body };
     });
   }
 
+  /**
+   * Default delete path. For tables that have a `deleted_at` column this performs
+   * a soft delete (`UPDATE ... SET deleted_at = now()`) and never issues a hard
+   * `DELETE` (Req 25.1). The soft-deleted row remains physically present and
+   * retrievable via the `includeDeleted` option on `findAll`/`findById`
+   * (Req 25.2, 25.3). Deleting a row whose `deleted_at` is already non-null makes
+   * no change and returns a not-found error while preserving the existing
+   * `deleted_at` value (Req 25.4). This path never invokes {@link hardDelete}
+   * (Req 25.5). For tables without a `deleted_at` column, physical removal is the
+   * only available behavior.
+   */
   static async delete(tableName: string, id: string | number) {
     const validatedTable = this.db.validateIdentifier(tableName);
-    await this.db.prepare(`DELETE FROM ${validatedTable} WHERE id = ?`).run(id);
-    
-    // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent(`${tableName}.deleted`, {
-      id
-    }).catch((e) => console.error("N8n send event failed", e));
-    
-    return true;
+
+    return await db.transaction(async () => {
+      if (this.hasSoftDelete(tableName)) {
+        // Soft delete: only mark rows that are not already soft-deleted so that an
+        // already-deleted target yields a not-found indication without altering the
+        // preserved deleted_at value (Req 25.1, 25.4).
+        const updated = await this.db
+          .prepare(`UPDATE ${validatedTable} SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL RETURNING id`)
+          .get(id);
+
+        if (!updated) {
+          throw new NotFoundError(`${tableName} item with ID ${id} not found`);
+        }
+      } else {
+        // Tables without a deleted_at column have no soft-delete semantics; remove
+        // the row physically. (Intentionally does not delegate to hardDelete so the
+        // distinct hard-delete operation is never reached via the default path.)
+        await this.db.prepare(`DELETE FROM ${validatedTable} WHERE id = ?`).run(id);
+      }
+
+      // --- AUTOMATION: buffer event for dispatch after commit (Req 20.1) ---
+      // If this transaction rolls back (e.g. the not-found case above) the
+      // buffered event is discarded and never dispatched (Req 20.3).
+      enqueueEvent({ name: `${tableName}.deleted`, payload: { id } });
+
+      return true;
+    });
+  }
+
+  /**
+   * Permanently removes a row from the database via a physical `DELETE`. This is
+   * a distinctly named operation that is NEVER invoked by the default
+   * {@link delete} path (Req 25.5). Callers must opt in explicitly when a hard
+   * delete is genuinely required.
+   */
+  static async hardDelete(tableName: string, id: string | number) {
+    const validatedTable = this.db.validateIdentifier(tableName);
+
+    return await db.transaction(async () => {
+      await this.db.prepare(`DELETE FROM ${validatedTable} WHERE id = ?`).run(id);
+
+      // --- AUTOMATION: buffer event for dispatch after commit (Req 20.1) ---
+      enqueueEvent({ name: `${tableName}.deleted`, payload: { id } });
+
+      return true;
+    });
   }
 }
 

@@ -2,11 +2,12 @@
  * PDF Generation Worker
  *
  * Processes PDF generation jobs from the BullMQ pdf-generation queue.
- * - 30-second timeout per render, returning browser instance to pool on timeout
+ * - Configurable per-job timeout (PDF_JOB_TIMEOUT_S: 5..300s, default 30s), racing
+ *   processing against the deadline and returning the browser to the pool on timeout
  * - Logs job status (success/failure) and execution duration
  * - Integrates with BrowserPool and PdfEngine for rendering
  *
- * Validates: Requirements 5.1, 5.5, 13.2, 13.3
+ * Validates: Requirements 5.1, 5.5, 13.2, 13.3, 22.1, 22.2, 22.3, 22.4, 22.5
  */
 
 import { type Job, type Worker } from 'bullmq';
@@ -23,12 +24,93 @@ import Handlebars from 'handlebars';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /**
- * Maximum time (ms) allowed for a single PDF render operation.
- * Requirement 13.2: 30-second timeout per PDF render.
+ * Inclusive lower bound (seconds) for the configurable PDF job timeout. Req 22.1.
  */
-const PDF_RENDER_TIMEOUT_MS = 30_000;
+export const PDF_TIMEOUT_MIN_S = 5;
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+/**
+ * Inclusive upper bound (seconds) for the configurable PDF job timeout. Req 22.1.
+ */
+export const PDF_TIMEOUT_MAX_S = 300;
+
+/**
+ * Documented default PDF job timeout (seconds), applied to absent, non-numeric,
+ * or out-of-range configuration values. Req 22.1, 22.2.
+ */
+export const PDF_TIMEOUT_DEFAULT_S = 30;
+
+/**
+ * Maximum time (ms) allowed for post-timeout cleanup of a single resource
+ * (page close, browser release). Requirements 22.3, 22.4: abort and release/close
+ * within 1 second of reaching the limit.
+ */
+const CLEANUP_DEADLINE_MS = 1_000;
+
+// ─── Pure Configuration Helper ─────────────────────────────────────────────────
+
+/**
+ * Parses the configured maximum PDF job execution time (in seconds).
+ *
+ * Pure helper: returns an integer within [{@link PDF_TIMEOUT_MIN_S},
+ * {@link PDF_TIMEOUT_MAX_S}], falling back to {@link PDF_TIMEOUT_DEFAULT_S} (30)
+ * for absent, non-numeric, or out-of-range input.
+ *
+ * Requirements 22.1, 22.2.
+ *
+ * @param raw The raw configured value (e.g. `process.env.PDF_JOB_TIMEOUT_S`).
+ * @returns A timeout in seconds guaranteed to sit within the accepted range.
+ */
+export function parsePdfTimeout(raw: string | number | undefined | null): number {
+  if (raw === undefined || raw === null) {
+    return PDF_TIMEOUT_DEFAULT_S;
+  }
+
+  let parsed: number;
+  if (typeof raw === 'number') {
+    parsed = raw;
+  } else {
+    const trimmed = raw.trim();
+    // Strict integer check: reject empty, floats, hex, and trailing garbage.
+    if (trimmed.length === 0 || !/^[+-]?\d+$/.test(trimmed)) {
+      return PDF_TIMEOUT_DEFAULT_S;
+    }
+    parsed = Number(trimmed);
+  }
+
+  if (!Number.isInteger(parsed)) {
+    return PDF_TIMEOUT_DEFAULT_S;
+  }
+
+  if (parsed < PDF_TIMEOUT_MIN_S || parsed > PDF_TIMEOUT_MAX_S) {
+    return PDF_TIMEOUT_DEFAULT_S;
+  }
+
+  return parsed;
+}
+
+// ─── Types & Errors ────────────────────────────────────────────────────────────
+
+/**
+ * Raised when a PDF generation job exceeds its configured maximum execution time.
+ * Carries the elapsed time and the configured maximum so the failure reason can
+ * report both. Requirement 22.5.
+ */
+export class PdfTimeoutError extends Error {
+  /** Elapsed execution time (ms) measured from the start of job processing. */
+  readonly elapsedMs: number;
+  /** Configured maximum execution time (ms). */
+  readonly configuredMaxMs: number;
+
+  constructor(elapsedMs: number, configuredMaxMs: number) {
+    super(
+      `PDF generation job timed out: elapsed ${elapsedMs}ms exceeded the configured ` +
+      `maximum execution time of ${configuredMaxMs}ms (${Math.round(configuredMaxMs / 1000)}s)`
+    );
+    this.name = 'PdfTimeoutError';
+    this.elapsedMs = elapsedMs;
+    this.configuredMaxMs = configuredMaxMs;
+  }
+}
 
 export interface PdfJobResult {
   /** The rendered PDF buffer as base64 (for storage) */
@@ -61,7 +143,11 @@ export async function processPdfJob(job: Job<PdfJobData>): Promise<PdfJobResult>
   const startTime = Date.now();
   const { requestId, templateId, payload, userId } = job.data;
 
-  logger.info(`[PdfWorker] Processing job ${job.id} (requestId: ${requestId}, template: ${templateId}, user: ${userId})`);
+  // Requirement 22.1, 22.2: resolve the configured maximum execution time
+  // (5..300s, default 30s) measured from the start of job processing.
+  const configuredMaxMs = parsePdfTimeout(process.env.PDF_JOB_TIMEOUT_S) * 1000;
+
+  logger.info(`[PdfWorker] Processing job ${job.id} (requestId: ${requestId}, template: ${templateId}, user: ${userId}, timeout: ${configuredMaxMs}ms)`);
 
   let browser: Awaited<ReturnType<typeof browserPool.acquire>> | null = null;
 
@@ -86,10 +172,10 @@ export async function processPdfJob(job: Job<PdfJobData>): Promise<PdfJobResult>
     const sanitizedHtml = sanitizeHtml(renderedBody);
     const fullHtml = wrapWithStyles(sanitizedHtml, settings, language);
 
-    // 5. Render PDF via Puppeteer with 30s timeout (Req 13.2)
+    // 5. Render PDF via Puppeteer, racing against the configured timeout (Req 22.1, 22.3)
     browser = await browserPool.acquire();
 
-    const pdfBuffer = await renderWithTimeout(browser, fullHtml, settings, language);
+    const pdfBuffer = await renderWithTimeout(browser, fullHtml, settings, language, configuredMaxMs, startTime);
 
     // Release browser back to pool on success
     await browserPool.release(browser);
@@ -127,25 +213,38 @@ export async function processPdfJob(job: Job<PdfJobData>): Promise<PdfJobResult>
       throw err; // Let BullMQ retry handle re-queuing
     }
 
-    // Requirement 13.2: Return browser to pool on timeout or other errors
+    // Requirement 13.2 / 22.4: Return browser to pool on timeout or other errors,
+    // bounding the release to CLEANUP_DEADLINE_MS so a hung browser cannot stall the worker.
     if (browser) {
-      try {
-        // Check if browser crashed before attempting release
-        if (browserPool.isCrashed(browser)) {
-          logger.warn(`[PdfWorker] Browser crashed during job ${job.id}, skipping release`);
-        } else {
-          await browserPool.release(browser);
+      const browserToRelease = browser;
+      await runWithin(CLEANUP_DEADLINE_MS, async () => {
+        try {
+          // Check if browser crashed before attempting release
+          if (browserPool.isCrashed(browserToRelease)) {
+            logger.warn(`[PdfWorker] Browser crashed during job ${job.id}, skipping release`);
+          } else {
+            await browserPool.release(browserToRelease);
+          }
+        } catch (releaseErr) {
+          // If release throws BrowserCrashedError, the browser was destroyed.
+          // The current error (timeout, template error, etc.) is the primary failure.
+          if (releaseErr instanceof BrowserCrashedError) {
+            logger.warn(`[PdfWorker] Browser crashed during release for job ${job.id}. Job will be retried.`);
+          } else {
+            logger.warn(`[PdfWorker] Failed to release browser after error: ${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}`);
+          }
         }
-      } catch (releaseErr) {
-        // If release throws BrowserCrashedError, the browser was destroyed.
-        // The current error (timeout, template error, etc.) is the primary failure.
-        if (releaseErr instanceof BrowserCrashedError) {
-          logger.warn(`[PdfWorker] Browser crashed during release for job ${job.id}. Job will be retried.`);
-        } else {
-          logger.warn(`[PdfWorker] Failed to release browser after error: ${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}`);
-        }
-      }
+      });
       browser = null;
+    }
+
+    // Requirement 22.5: a timeout failure reason must include elapsed and configured max time.
+    if (err instanceof PdfTimeoutError) {
+      logger.error(
+        `[PdfWorker] Job ${job.id} timed out. ` +
+        `Elapsed: ${err.elapsedMs}ms, ConfiguredMax: ${err.configuredMaxMs}ms, RequestId: ${requestId}`
+      );
+      throw err;
     }
 
     // Requirement 5.5: Log failure with execution duration
@@ -159,17 +258,22 @@ export async function processPdfJob(job: Job<PdfJobData>): Promise<PdfJobResult>
 }
 
 /**
- * Renders HTML to PDF using Puppeteer with a 30-second timeout.
- * Requirement 13.2: 30-second timeout per PDF render.
+ * Renders HTML to PDF using Puppeteer, racing the render against the configured
+ * maximum execution time. Requirements 22.1, 22.3, 22.4, 22.5.
  *
- * On timeout, the page is closed and a timeout error is thrown.
- * The caller is responsible for releasing the browser back to the pool.
+ * The timeout deadline is measured from the start of job processing (`startTime`)
+ * so time already spent loading templates/settings counts toward the limit. On
+ * timeout a {@link PdfTimeoutError} is thrown (carrying elapsed + configured max),
+ * the in-flight render is aborted, and the page is closed within
+ * {@link CLEANUP_DEADLINE_MS}. The caller releases the browser back to the pool.
  */
 async function renderWithTimeout(
   browser: Awaited<ReturnType<typeof browserPool.acquire>>,
   fullHtml: string,
   settings: ReturnType<typeof mapRowToSettings>,
-  language: 'ar' | 'en'
+  language: 'ar' | 'en',
+  configuredMaxMs: number,
+  startTime: number
 ): Promise<Buffer> {
   const page = await browser.newPage();
 
@@ -185,19 +289,23 @@ async function renderWithTimeout(
       }
     });
 
-    // Race: render PDF vs. 30-second timeout
+    // Race: render PDF vs. the remaining time before the configured deadline.
+    const remainingMs = startTime + configuredMaxMs - Date.now();
     const pdfBuffer = await Promise.race([
       renderPage(page, fullHtml, settings, language),
-      createTimeout(PDF_RENDER_TIMEOUT_MS),
+      createTimeout(remainingMs, startTime, configuredMaxMs),
     ]);
 
     return Buffer.from(pdfBuffer);
   } finally {
-    try {
-      await page.close();
-    } catch {
-      // Page may already be closed
-    }
+    // Requirement 22.4: close the page within 1 second (abort the render).
+    await runWithin(CLEANUP_DEADLINE_MS, async () => {
+      try {
+        await page.close();
+      } catch {
+        // Page may already be closed
+      }
+    });
   }
 }
 
@@ -235,14 +343,40 @@ async function renderPage(
 }
 
 /**
- * Creates a promise that rejects after the specified timeout.
+ * Creates a promise that rejects with a {@link PdfTimeoutError} once the configured
+ * deadline is reached. Requirements 22.3, 22.5.
+ *
+ * @param remainingMs Time left before the deadline (clamped to >= 0).
+ * @param startTime   Epoch ms marking the start of job processing (for elapsed time).
+ * @param configuredMaxMs The configured maximum execution time in ms.
  */
-function createTimeout(ms: number): Promise<never> {
+function createTimeout(remainingMs: number, startTime: number, configuredMaxMs: number): Promise<never> {
   return new Promise((_, reject) => {
     setTimeout(() => {
-      reject(new Error(`PDF render timeout: exceeded ${ms / 1000} seconds`));
-    }, ms);
+      reject(new PdfTimeoutError(Date.now() - startTime, configuredMaxMs));
+    }, Math.max(0, remainingMs));
   });
+}
+
+/**
+ * Runs an async cleanup operation, bounding it to `ms` milliseconds so a hung
+ * resource (page/browser) cannot stall the worker. Requirements 22.3, 22.4.
+ *
+ * Resolves when the operation finishes or the deadline elapses, whichever comes
+ * first; never rejects.
+ */
+async function runWithin(ms: number, op: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  try {
+    await Promise.race([op().catch(() => {}), deadline]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 // ─── Worker Registration ─────────────────────────────────────────────────────

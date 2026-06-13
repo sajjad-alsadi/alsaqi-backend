@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 import type { ApiServerConfig } from '../../index.js';
 
 // Route factory imports
-import { createAuthRoutes } from '../auth.js';
+import { createAuthRoutes } from '../auth/index.js';
 import { createUserRoutes } from '../users.js';
 import { createRoleRoutes } from '../roles.js';
 import { createJobTitleRoutes } from '../jobTitles.js';

@@ -210,7 +210,8 @@ export const createUserRoutes = (
     }
     const { newPassword } = validation.data;
     const username = await UserService.resetPassword(id, newPassword);
-    
+
+    invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Reset Password", "User Management", `Reset password for user ${username}`);
       
     res.json({ success: true });

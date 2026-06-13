@@ -6,6 +6,7 @@ import { totpService } from '../../services/TOTPService';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { validateSchema } from '../../middleware/validate';
 import { generateCsrfToken, attachCsrfToken } from '../../middleware/csrf';
+import { getRefreshCookiePath } from '../../services/refreshCookiePath';
 
 const loginSchema = z.object({
   usernameOrEmail: z.string().min(1, "Username or Email is required").max(100),
@@ -59,7 +60,7 @@ export const createLoginRoutes = (
       httpOnly: true,
       secure: isProduction, 
       sameSite: isProduction ? 'none' : 'lax', 
-      path: '/api/auth/refresh', // Restrict cookie path
+      path: getRefreshCookiePath(), // Restrict cookie to the configured refresh endpoint path (Req 19.1)
       maxAge: rememberMe ? 30 * 24 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000 // 30 days or 8 hours in ms
     });
 

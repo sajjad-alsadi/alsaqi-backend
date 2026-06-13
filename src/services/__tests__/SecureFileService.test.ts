@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { SecureFileService } from '../SecureFileService';
 
 describe('SecureFileService', () => {
@@ -13,9 +16,10 @@ describe('SecureFileService', () => {
   });
 
   describe('clampTtl', () => {
-    it('should return default TTL (3600) when no value provided', () => {
-      expect(SecureFileService.clampTtl()).toBe(3600);
-      expect(SecureFileService.clampTtl(undefined)).toBe(3600);
+    it('should return the default TTL clamped to the 900s maximum when no value provided', () => {
+      // Default (3600) is clamped down to the configured maximum of 900s (Req 11.4)
+      expect(SecureFileService.clampTtl()).toBe(900);
+      expect(SecureFileService.clampTtl(undefined)).toBe(900);
     });
 
     it('should clamp to minimum TTL (300s = 5 minutes) for values below', () => {
@@ -24,16 +28,18 @@ describe('SecureFileService', () => {
       expect(SecureFileService.clampTtl(-100)).toBe(300);
     });
 
-    it('should clamp to maximum TTL (604800s = 7 days) for values above', () => {
-      expect(SecureFileService.clampTtl(700000)).toBe(604800);
-      expect(SecureFileService.clampTtl(1000000)).toBe(604800);
+    it('should clamp to maximum TTL (900s = 15 minutes) for values above', () => {
+      expect(SecureFileService.clampTtl(901)).toBe(900);
+      expect(SecureFileService.clampTtl(3600)).toBe(900);
+      expect(SecureFileService.clampTtl(700000)).toBe(900);
+      expect(SecureFileService.clampTtl(1000000)).toBe(900);
     });
 
     it('should pass through valid TTL values within range', () => {
       expect(SecureFileService.clampTtl(300)).toBe(300);
-      expect(SecureFileService.clampTtl(3600)).toBe(3600);
-      expect(SecureFileService.clampTtl(604800)).toBe(604800);
-      expect(SecureFileService.clampTtl(1800)).toBe(1800);
+      expect(SecureFileService.clampTtl(600)).toBe(600);
+      expect(SecureFileService.clampTtl(900)).toBe(900);
+      expect(SecureFileService.clampTtl(450)).toBe(450);
     });
   });
 
@@ -55,18 +61,18 @@ describe('SecureFileService', () => {
 
     it('should set expiry based on provided TTL', () => {
       const before = Math.floor(Date.now() / 1000);
-      const url = SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 1800);
+      const url = SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 600);
       const after = Math.floor(Date.now() / 1000);
 
       const expiresMatch = url.match(/expires=(\d+)/);
       expect(expiresMatch).not.toBeNull();
       const expires = parseInt(expiresMatch![1], 10);
 
-      expect(expires).toBeGreaterThanOrEqual(before + 1800);
-      expect(expires).toBeLessThanOrEqual(after + 1800);
+      expect(expires).toBeGreaterThanOrEqual(before + 600);
+      expect(expires).toBeLessThanOrEqual(after + 600);
     });
 
-    it('should use default TTL (3600s) when not specified', () => {
+    it('should use default TTL (900s) when not specified', () => {
       const before = Math.floor(Date.now() / 1000);
       const url = SecureFileService.generateSignedUrl('/file.pdf', 'user-1');
       const after = Math.floor(Date.now() / 1000);
@@ -74,8 +80,21 @@ describe('SecureFileService', () => {
       const expiresMatch = url.match(/expires=(\d+)/);
       const expires = parseInt(expiresMatch![1], 10);
 
-      expect(expires).toBeGreaterThanOrEqual(before + 3600);
-      expect(expires).toBeLessThanOrEqual(after + 3600);
+      expect(expires).toBeGreaterThanOrEqual(before + 900);
+      expect(expires).toBeLessThanOrEqual(after + 900);
+    });
+
+    it('should never issue a URL exceeding the 900s maximum TTL', () => {
+      const before = Math.floor(Date.now() / 1000);
+      const url = SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 100000);
+      const after = Math.floor(Date.now() / 1000);
+
+      const expiresMatch = url.match(/expires=(\d+)/);
+      const expires = parseInt(expiresMatch![1], 10);
+
+      // Clamped down to the 900s maximum (Req 11.4)
+      expect(expires).toBeGreaterThanOrEqual(before + 900);
+      expect(expires).toBeLessThanOrEqual(after + 900);
     });
 
     it('should clamp TTL below minimum to 5 minutes', () => {
@@ -249,23 +268,115 @@ describe('SecureFileService', () => {
       expect(sig1).not.toBe(sig2);
     });
 
-    it('should fall back to JWT_SECRET when FILE_ACCESS_SECRET is not set', () => {
+    it('should NOT fall back to JWT_SECRET when FILE_ACCESS_SECRET is not set', () => {
       delete process.env.FILE_ACCESS_SECRET;
       process.env.JWT_SECRET = 'jwt-fallback-secret';
 
-      const url = SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 3600);
-      expect(url).toContain('sig=');
-
-      // Verify the URL is valid with the same secret
-      const expiresMatch = url.match(/expires=(\d+)/);
-      const sigMatch = url.match(/sig=([a-f0-9]+)/);
-      const result = SecureFileService.verifySignedUrl(
-        '/file.pdf',
-        'user-1',
-        parseInt(expiresMatch![1], 10),
-        sigMatch![1]
+      // No JWT/hardcoded fallback: signing must fail rather than silently
+      // sign with a different secret (Req 9.3, 9.4)
+      expect(() => SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 600)).toThrow(
+        /FILE_ACCESS_SECRET/
       );
-      expect(result.valid).toBe(true);
+    });
+
+    it('should NOT fall back when FILE_ACCESS_SECRET is whitespace-only', () => {
+      process.env.FILE_ACCESS_SECRET = '   ';
+      process.env.JWT_SECRET = 'jwt-fallback-secret';
+
+      expect(() => SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 600)).toThrow(
+        /FILE_ACCESS_SECRET/
+      );
+    });
+
+    it('should not contain a hardcoded fallback secret in the source', () => {
+      // The previous implementation fell back to 'alsaqi-dev-secret-key-123'.
+      // Verify both that signing fails without a configured secret and that the
+      // hardcoded literal is no longer used as a signing key.
+      delete process.env.FILE_ACCESS_SECRET;
+      delete process.env.JWT_SECRET;
+
+      expect(() => SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 600)).toThrow();
+    });
+  });
+});
+
+/**
+ * Smoke test: absence of a hardcoded fallback secret (Task 10.5).
+ *
+ * The previous implementation fell back to the literal 'alsaqi-dev-secret-key-123'
+ * and to JWT_SECRET when FILE_ACCESS_SECRET was absent. This suite scans the
+ * SecureFileService source to prove those fallbacks are gone, and asserts that
+ * signing/verifying fails closed when FILE_ACCESS_SECRET is not configured.
+ *
+ * _Requirements: 9.3_
+ */
+describe('SecureFileService hardcoded-fallback-secret smoke test (Req 9.3)', () => {
+  const sourcePath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '..',
+    'SecureFileService.ts'
+  );
+  const source = readFileSync(sourcePath, 'utf8');
+
+  it('does not contain the previous hardcoded dev secret literal', () => {
+    expect(source).not.toContain('alsaqi-dev-secret-key-123');
+  });
+
+  it('does not reference JWT_SECRET as a signing fallback', () => {
+    // The dedicated FILE_ACCESS_SECRET is the only signing key; there must be
+    // no reference to the JWT signing secret anywhere in the service source.
+    expect(source).not.toContain('JWT_SECRET');
+    expect(source).not.toContain('getJwtSecret');
+    expect(source).not.toContain('jwtSecret');
+  });
+
+  it('derives the HMAC signing key from requireSecret(), never a literal', () => {
+    // The HMAC key argument must be the dynamic secret accessor, not a quoted
+    // string literal that could act as a hardcoded/default/example secret.
+    const hmacCalls = source.match(/createHmac\(\s*['"]sha256['"]\s*,\s*([^)]+)\)/g) ?? [];
+    expect(hmacCalls.length).toBeGreaterThan(0);
+    for (const call of hmacCalls) {
+      // Key argument is everything after the algorithm argument.
+      const keyArg = call.replace(/createHmac\(\s*['"]sha256['"]\s*,\s*/, '').replace(/\)$/, '');
+      expect(keyArg).toContain('requireSecret');
+      // The key must not be a quoted string literal.
+      expect(keyArg).not.toMatch(/^['"`]/);
+    }
+  });
+
+  it('reads the signing secret only from FILE_ACCESS_SECRET (via env config)', () => {
+    // The only secret source is getFileAccessSecret(), which reads FILE_ACCESS_SECRET.
+    expect(source).toContain('getFileAccessSecret');
+    expect(source).toContain('FILE_ACCESS_SECRET');
+  });
+
+  describe('fails closed without a configured FILE_ACCESS_SECRET', () => {
+    const originalEnv = process.env;
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+    });
+
+    afterEach(() => {
+      process.env = originalEnv;
+    });
+
+    it('throws when FILE_ACCESS_SECRET is unset (no silent fallback)', () => {
+      delete process.env.FILE_ACCESS_SECRET;
+      delete process.env.JWT_SECRET;
+
+      expect(() => SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 600)).toThrow(
+        /FILE_ACCESS_SECRET/
+      );
+    });
+
+    it('throws even when JWT_SECRET is present (no JWT fallback)', () => {
+      delete process.env.FILE_ACCESS_SECRET;
+      process.env.JWT_SECRET = 'some-jwt-signing-secret-value-123456';
+
+      expect(() => SecureFileService.generateSignedUrl('/file.pdf', 'user-1', 600)).toThrow(
+        /FILE_ACCESS_SECRET/
+      );
     });
   });
 });

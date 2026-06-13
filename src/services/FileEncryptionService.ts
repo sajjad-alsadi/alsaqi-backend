@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
 import logger from '../utils/logger';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -35,6 +36,17 @@ export interface DecryptFileResult {
   metadata: EncryptionMetadata;
 }
 
+export interface DecryptStreamResult {
+  /**
+   * A readable stream emitting the decrypted plaintext in bounded chunks
+   * (≤ STREAM_CHUNK_SIZE bytes). For GCM-encrypted files this is the decipher
+   * transform; integrity is verified on stream end (`final()`), surfacing any
+   * auth-tag/tamper failure as an `error` event.
+   */
+  stream: Readable;
+  metadata: EncryptionMetadata;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const ALGORITHM = 'aes-256-gcm';
@@ -43,6 +55,16 @@ const AUTH_TAG_LENGTH = 16;
 const KEY_LENGTH = 32;
 const HKDF_INFO = 'alsaqi-file-encryption';
 const HKDF_SALT = 'alsaqi-file-enc-salt';
+
+/** Header prefix length: [IV (12 bytes)][AuthTag (16 bytes)] precedes the ciphertext. */
+const HEADER_LENGTH = IV_LENGTH + AUTH_TAG_LENGTH;
+
+/**
+ * Maximum size of each decrypted chunk produced while streaming (64 KB). This bounds
+ * the read-stream `highWaterMark` so the decipher never processes more than 64 KB at a
+ * time, keeping resident memory bounded independent of total file size (Req 12.1, 12.3).
+ */
+const STREAM_CHUNK_SIZE = 64 * 1024;
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
@@ -229,6 +251,96 @@ export class FileEncryptionService {
     }
 
     return { buffer: decrypted, metadata };
+  }
+
+  /**
+   * Creates a streaming decryptor for an encrypted file.
+   *
+   * Instead of buffering the entire file in memory (as `decryptFile` does), this reads
+   * the fixed-size header ([IV (12 bytes)][AuthTag (16 bytes)]) up front, configures an
+   * AES-256-GCM decipher with the IV and auth tag, then pipes the ciphertext through the
+   * decipher in chunks of at most {@link STREAM_CHUNK_SIZE} (64 KB). The returned stream
+   * emits decrypted plaintext incrementally, so callers can write each chunk to a response
+   * before the next is decrypted — keeping resident memory bounded regardless of file size
+   * (Req 12.1, 12.2, 12.3).
+   *
+   * GCM integrity is enforced by the decipher's `final()` step: if any chunk was tampered
+   * with or the auth tag does not verify, the stream emits an `error` event rather than
+   * completing, allowing the caller to terminate delivery (Req 12.4).
+   *
+   * The returned stream owns the underlying file handle; destroying the stream (e.g. on
+   * client disconnect) releases the read stream and its file descriptor (Req 12.5).
+   *
+   * @param fileId - The unique file identifier
+   * @returns A readable plaintext stream and the associated metadata
+   * @throws Error if file metadata not found or the encryption key is missing
+   */
+  async createDecryptStream(fileId: string): Promise<DecryptStreamResult> {
+    const metadata = this.metadataStore.get(fileId);
+    if (!metadata) {
+      throw new Error(`File metadata not found for fileId: ${fileId}`);
+    }
+
+    // If file was stored unencrypted (keyVersion === 0 or no iv), stream it as-is.
+    if (!metadata.iv || metadata.keyVersion === 0) {
+      const filePath = path.join(this.uploadDir, `${fileId}`);
+      const stream = fs.createReadStream(filePath, { highWaterMark: STREAM_CHUNK_SIZE });
+      return { stream, metadata };
+    }
+
+    if (!this.encryptionKey) {
+      throw new Error(
+        'Cannot decrypt file: FILE_ENCRYPTION_KEY is not set but file was encrypted.'
+      );
+    }
+
+    const encryptedPath = path.join(this.uploadDir, `${fileId}.enc`);
+
+    // Read the fixed-size header ([IV][AuthTag]) up front. GCM requires the auth tag to be
+    // set on the decipher before the final block is processed; here the tag is stored as a
+    // prefix (not a trailer), so we read it eagerly and release this handle immediately.
+    const header = Buffer.alloc(HEADER_LENGTH);
+    const fh = await fs.promises.open(encryptedPath, 'r');
+    try {
+      const { bytesRead } = await fh.read(header, 0, HEADER_LENGTH, 0);
+      if (bytesRead < HEADER_LENGTH) {
+        throw new Error(
+          `Encrypted file is truncated for fileId: ${fileId} (header incomplete).`
+        );
+      }
+    } finally {
+      await fh.close();
+    }
+
+    const iv = header.subarray(0, IV_LENGTH);
+    const authTag = header.subarray(IV_LENGTH, HEADER_LENGTH);
+
+    const decipher = crypto.createDecipheriv(ALGORITHM, this.encryptionKey, iv);
+    decipher.setAuthTag(authTag);
+
+    // Stream the ciphertext (everything after the header) through the decipher in ≤ 64 KB
+    // chunks. The read stream owns the file descriptor.
+    const ciphertextStream = fs.createReadStream(encryptedPath, {
+      start: HEADER_LENGTH,
+      highWaterMark: STREAM_CHUNK_SIZE,
+    });
+
+    // Wire failures and lifecycle so the file handle is always released:
+    // - a read error aborts the decipher
+    // - destroying the decipher (e.g. on client disconnect) destroys the read stream,
+    //   closing its file descriptor (Req 12.5)
+    ciphertextStream.on('error', (err) => {
+      decipher.destroy(err);
+    });
+    decipher.on('close', () => {
+      if (!ciphertextStream.destroyed) {
+        ciphertextStream.destroy();
+      }
+    });
+
+    ciphertextStream.pipe(decipher);
+
+    return { stream: decipher, metadata };
   }
 
   /**

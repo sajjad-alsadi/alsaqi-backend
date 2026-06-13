@@ -4,6 +4,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ModuleRegistry } from '../permissions/registry';
 import { PermissionService } from '../services/PermissionService';
 import { PermissionAuditService } from '../services/PermissionAuditService';
+import { AuthCacheInvalidator } from '../services/AuthCacheInvalidator';
 import { PermissionAction, PermissionUpdate } from '../permissions/types';
 import { permissionAdminRateLimiter } from '../middleware/permissionAdminRateLimiter';
 
@@ -753,8 +754,10 @@ export const createPermissionAdminRoutes = (
         });
       }
 
-      // Invalidate cache for this user (Req 9.2)
-      PermissionService.invalidateCache(id);
+      // Invalidate the full cached auth state for this user via the canonical
+      // invalidator so the changed permission set takes effect within 1 second
+      // and is retried/forced on failure (Req 16.2, 16.4).
+      await AuthCacheInvalidator.invalidate(id);
 
       res.json({
         message: 'User permission overrides updated successfully',

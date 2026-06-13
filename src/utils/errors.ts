@@ -38,6 +38,24 @@ export class AuthError extends AppError {
   }
 }
 
+/**
+ * A single, generic authentication failure used for all login-failure conditions
+ * (unknown account, wrong password, suspended account, locked account).
+ *
+ * Anti-enumeration / timing safety (Requirement 15): every login failure MUST surface a
+ * byte-for-byte identical client response — same status code, same error code, and same
+ * message — so an attacker cannot distinguish which of the four conditions occurred
+ * (Req 15.2, 15.3). The fixed message and status here are intentionally hardcoded so the
+ * response cannot vary across call sites. Server-side side effects (failed-attempt counting,
+ * lockout, admin notification, warn logs) are handled by the caller and do not change this
+ * client-visible response.
+ */
+export class InvalidCredentialsError extends AppError {
+  constructor() {
+    super('Invalid credentials', 401, ErrorCode.UNAUTHORIZED);
+  }
+}
+
 export class ForbiddenError extends AppError {
   constructor(message = 'Permission denied') {
     super(message, 403, ErrorCode.FORBIDDEN);

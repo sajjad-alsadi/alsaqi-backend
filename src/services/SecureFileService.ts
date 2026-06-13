@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import logger from '../utils/logger';
+import { getFileAccessSecret, getFileSignedUrlMaxTtlS } from '../config/environmentConfig';
 
 /**
  * Minimum TTL: 5 minutes (in seconds)
@@ -6,14 +8,15 @@ import crypto from 'crypto';
 const MIN_TTL = 5 * 60;
 
 /**
- * Maximum TTL: 7 days (in seconds)
- */
-const MAX_TTL = 7 * 24 * 60 * 60;
-
-/**
- * Default TTL: 60 minutes (in seconds)
+ * Default TTL: 60 minutes (in seconds). Always clamped down to the configured
+ * maximum so an issued URL can never exceed the maximum TTL (Req 11.4).
  */
 const DEFAULT_TTL = 60 * 60;
+
+/**
+ * Minimum acceptable length of FILE_ACCESS_SECRET in characters (Req 9.2).
+ */
+const MIN_SECRET_LENGTH = 32;
 
 /**
  * Result of signed URL verification.
@@ -31,24 +34,74 @@ export interface SignedUrlVerificationResult {
  * Uses HMAC-SHA256 signatures bound to filePath + userId + expiry.
  * Verification uses crypto.timingSafeEqual to prevent timing attacks.
  *
- * Requirements: 12.1, 12.5, 12.6, 12.7
+ * The signing/verifying secret is the dedicated `FILE_ACCESS_SECRET` only —
+ * there is no JWT-secret or hardcoded fallback (Req 9.3, 9.4). The secret is
+ * asserted at startup via `assertConfigured()` (Req 9.1, 9.2), and every issued
+ * URL is capped at the configured maximum TTL of 900 seconds (Req 11.4).
+ *
+ * Requirements: 9.3, 9.4, 9.5, 11.4
  */
 export class SecureFileService {
-  private static getSecret(): string {
-    return process.env.FILE_ACCESS_SECRET || process.env.JWT_SECRET || 'alsaqi-dev-secret-key-123';
+  /**
+   * Returns the dedicated file-access signing secret. Reads `FILE_ACCESS_SECRET`
+   * only — there is no JWT-secret or hardcoded/default fallback (Req 9.3, 9.4).
+   *
+   * @throws Error when `FILE_ACCESS_SECRET` is unset, empty, or whitespace-only.
+   *   Startup validation via {@link assertConfigured} guarantees this never
+   *   throws once the process has begun serving requests.
+   */
+  private static requireSecret(): string {
+    const secret = getFileAccessSecret();
+    if (!secret) {
+      throw new Error(
+        'FILE_ACCESS_SECRET is not configured. The Secure File Service cannot sign or verify file-access URLs.'
+      );
+    }
+    return secret;
   }
 
   /**
-   * Clamps the TTL value to the allowed range [5 minutes, 7 days].
-   * Returns the default TTL (60 minutes) if no value is provided.
+   * Fail-fast startup assertion for the dedicated file-access secret.
+   *
+   * Writes a fatal configuration error and terminates the process with a
+   * non-zero exit code when `FILE_ACCESS_SECRET` is unset/whitespace-only
+   * (Req 9.1) or shorter than the minimum length (Req 9.2). Intended to be
+   * called during the startup sequence before any port binding.
+   */
+  static assertConfigured(): void {
+    const secret = getFileAccessSecret();
+
+    if (!secret) {
+      logger.error(
+        'FATAL: FILE_ACCESS_SECRET is not configured. Set a dedicated file-access secret of at least ' +
+          `${MIN_SECRET_LENGTH} characters before starting the service.`
+      );
+      process.exit(1);
+    }
+
+    if (secret.length < MIN_SECRET_LENGTH) {
+      logger.error(
+        `FATAL: FILE_ACCESS_SECRET must be at least ${MIN_SECRET_LENGTH} characters; ` +
+          `received a value of length ${secret.length}.`
+      );
+      process.exit(1);
+    }
+  }
+
+  /**
+   * Clamps the TTL value to the allowed range [5 minutes, configured maximum].
+   * The maximum is read from the typed environment config and never exceeds
+   * 900 seconds (Req 11.4). Returns the default TTL (clamped to the maximum)
+   * when no value is provided.
    */
   static clampTtl(ttl?: number): number {
-    if (ttl === undefined || ttl === null) {
-      return DEFAULT_TTL;
-    }
-    if (ttl < MIN_TTL) return MIN_TTL;
-    if (ttl > MAX_TTL) return MAX_TTL;
-    return ttl;
+    const maxTtl = getFileSignedUrlMaxTtlS();
+
+    // The configured maximum is a hard upper bound that must ALWAYS bind
+    // (Req 11.4). We clamp up to MIN_TTL first, then cap to maxTtl so that
+    // when maxTtl < MIN_TTL the result is maxTtl and never exceeds it.
+    const effectiveTtl = ttl === undefined || ttl === null ? DEFAULT_TTL : ttl;
+    return Math.min(Math.max(effectiveTtl, MIN_TTL), maxTtl);
   }
 
   /**
@@ -56,7 +109,7 @@ export class SecureFileService {
    *
    * @param filePath - The file path relative to the uploads directory
    * @param userId - The ID of the user generating the signed URL
-   * @param ttl - Time-to-live in seconds (default: 3600, min: 300, max: 604800)
+   * @param ttl - Time-to-live in seconds (default: 3600, min: 300, max: 900)
    * @returns The signed URL path with query parameters (expires, userId, sig)
    */
   static generateSignedUrl(filePath: string, userId: string, ttl?: number): string {
@@ -92,7 +145,7 @@ export class SecureFileService {
       return { valid: false, expired: true, reason: 'URL has expired' };
     }
 
-    // Compute expected signature
+    // Compute expected signature using the current FILE_ACCESS_SECRET (Req 9.5)
     const expectedSignature = this.computeSignature(filePath, userId, expires);
 
     // Use timing-safe comparison to prevent timing attacks
@@ -115,12 +168,13 @@ export class SecureFileService {
 
   /**
    * Computes the HMAC-SHA256 signature for the given parameters.
-   * The signature is bound to filePath + userId + expiry.
+   * The signature is bound to filePath + userId + expiry and is keyed with the
+   * dedicated `FILE_ACCESS_SECRET` (Req 9.4).
    */
   private static computeSignature(filePath: string, userId: string, expires: number): string {
     const payload = `${filePath}:${userId}:${expires}`;
     return crypto
-      .createHmac('sha256', this.getSecret())
+      .createHmac('sha256', this.requireSecret())
       .update(payload)
       .digest('hex');
   }

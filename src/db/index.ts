@@ -6,15 +6,95 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { createSSLConfig, validateSSLConnection } from "./sslConfig.js";
 import { checkSlowQuery, initDbMetrics } from "../monitoring/dbMetrics.js";
+import {
+  classifyDatabaseUrl,
+  isEmbeddedDbAllowed,
+  parsePoolConfig,
+  type DbUrlClassification,
+  type PoolConfigError,
+} from "./poolConfig.js";
+import {
+  runWithEventBuffer,
+  flushOnCommit,
+  discardOnRollback,
+} from "../services/transactionalEvents.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * A positional parameter bound to a prepared statement or executed query.
+ * Values are forwarded to the underlying driver unchanged.
+ */
+export type DBParam = unknown;
+
+/** A single row returned from a query, keyed by column name. */
+export type DBRow = Record<string, unknown>;
+
+/**
+ * The result of a low-level driver query. Structurally compatible with both
+ * the `pg` driver's `QueryResult` and PGlite's results object.
+ */
+export interface DBQueryResult<R = DBRow> {
+  rows: R[];
+  rowCount?: number | null;
+}
+
+/**
+ * A connection capable of executing SQL. Implemented by `pg.Pool`, a checked-out
+ * `pg` pool client, and a PGlite instance.
+ */
+export interface DBConnection {
+  query<R = DBRow>(sql: string, params?: DBParam[]): Promise<DBQueryResult<R>>;
+  /** Present on a checked-out pool client; returns it to the pool. */
+  release?(): void;
+}
+
+/**
+ * The underlying database client backing the wrapper: an external `pg.Pool`
+ * or an embedded PGlite instance. Capability-specific members are optional so
+ * callers can feature-detect (e.g. `waitReady`/`close` on PGlite,
+ * `connect` on `pg.Pool`).
+ */
+export interface DatabaseClient extends DBConnection {
+  /** Present on PGlite; resolves once the embedded engine is ready. */
+  waitReady?: Promise<unknown>;
+  /** Present on PGlite; releases embedded engine resources. */
+  close?(): Promise<void>;
+  /** Present on `pg.Pool`; checks out a dedicated pooled connection. */
+  connect?(): Promise<DBConnection>;
+}
+
+/** The result of a write (`run`) operation executed through the wrapper. */
+export interface RunResult {
+  lastInsertRowid: number;
+  changes: number;
+}
+
+/** A prepared statement bound to a single SQL string. */
+export interface PreparedStatement {
+  /** Returns the first matching row, or `undefined` when there are none. */
+  get<T = unknown>(...params: DBParam[]): Promise<T | undefined>;
+  /** Returns all matching rows. */
+  all<T = unknown>(...params: DBParam[]): Promise<T[]>;
+  /** Executes a write and returns affected-row metadata. */
+  run(...params: DBParam[]): Promise<RunResult>;
+}
+
 // Initialize variables, but don't create the client immediately to avoid blocking startup
-let client: any = null;
+let client: DatabaseClient | null = null;
 let isExternal = false;
 
 const DATABASE_URL = process.env.DATABASE_URL;
+
+// Classify DATABASE_URL once at module load (Req 1.1, 1.4). The fatal decisions
+// based on this classification are deferred to initDb() so that merely importing
+// this module (e.g. in unit tests) never terminates the process.
+const dbUrlClassification: DbUrlClassification = classifyDatabaseUrl(DATABASE_URL);
+
+// Holds a pool-configuration validation error, if any. A non-null value causes
+// initDb() to abort startup with a non-zero exit code (Req 2.3).
+let poolConfigError: PoolConfigError | null = null;
 
 export function getPersistentDataDir(): string {
   // Always use /tmp to avoid filesystem permission issues in Cloud Run
@@ -43,7 +123,7 @@ export function getPersistentDataDir(): string {
   return dataDir;
 }
 
-function createPgliteClient(isRetry = false) {
+function createPgliteClient(isRetry = false): DatabaseClient {
   const dataDir = getPersistentDataDir();
   
   const cleanupStaleFiles = (dir: string) => {
@@ -99,32 +179,49 @@ function createPgliteClient(isRetry = false) {
   }
 }
 
-if (DATABASE_URL && !DATABASE_URL.startsWith('http')) {
-  // Build SSL config based on environment
-  const sslConfig = createSSLConfig(process.env);
-  const isLocal = DATABASE_URL.includes('localhost') || DATABASE_URL.includes('127.0.0.1') || DATABASE_URL.includes('0.0.0.0');
+if (dbUrlClassification.kind === "valid-external") {
+  const normalizedUrl = dbUrlClassification.normalized as string;
 
-  // Determine SSL option: production uses createSSLConfig, local dev disables SSL
-  let sslOption: pg.PoolConfig['ssl'];
-  if (sslConfig) {
-    sslOption = sslConfig.ssl;
-  } else if (isLocal) {
-    sslOption = false;
+  // Build the connection pool from validated, environment-driven configuration
+  // (Req 2.1, 2.2, 2.3). On invalid pool variables, defer the fatal exit to
+  // initDb() rather than terminating at import time.
+  const poolResult = parsePoolConfig(process.env);
+  if (!poolResult.ok) {
+    poolConfigError = poolResult.error;
+    isExternal = false;
   } else {
-    // Non-production, non-local: use permissive SSL (don't reject unauthorized)
-    sslOption = { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' };
-  }
+    // Build SSL config based on environment
+    const sslConfig = createSSLConfig(process.env);
+    const isLocal =
+      normalizedUrl.includes("localhost") ||
+      normalizedUrl.includes("127.0.0.1") ||
+      normalizedUrl.includes("0.0.0.0");
 
-  client = new pg.Pool({
-    connectionString: DATABASE_URL,
-    ssl: sslOption,
-    connectionTimeoutMillis: 2000,
-    max: 20,
-    idleTimeoutMillis: 30000,
-  });
-  isExternal = true;
+    // Determine SSL option: production uses createSSLConfig, local dev disables SSL
+    let sslOption: pg.PoolConfig["ssl"];
+    if (sslConfig) {
+      sslOption = sslConfig.ssl;
+    } else if (isLocal) {
+      sslOption = false;
+    } else {
+      // Non-production, non-local: use permissive SSL (don't reject unauthorized)
+      sslOption = {
+        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false",
+      };
+    }
+
+    client = new pg.Pool({
+      connectionString: normalizedUrl,
+      ssl: sslOption,
+      connectionTimeoutMillis: poolResult.config.connectionTimeoutMillis,
+      max: poolResult.config.max,
+      idleTimeoutMillis: 30000,
+    });
+    isExternal = true;
+  }
 } else {
-  // We'll initialize PGlite lazily
+  // DATABASE_URL is missing or an http(s) URL: no external pool is created.
+  // PGlite (when permitted) is initialized lazily/in initDb.
   isExternal = false;
 }
 
@@ -139,7 +236,7 @@ export function getPool(): pg.Pool | null {
   return null;
 }
 
-const als = new AsyncLocalStorage<any>();
+const als = new AsyncLocalStorage<DBConnection>();
 
 /**
  * ReadWriteLock for PGlite mode.
@@ -285,38 +382,34 @@ export function isReadQuery(sql: string): boolean {
 
 /** Public interface for the database wrapper */
 export interface IDBWrapper {
-  readonly client: any;
+  readonly client: DatabaseClient;
   readonly isExternal: boolean;
   validateIdentifier(id: string): string;
-  prepare(sql: string): {
-    get(...params: any[]): Promise<any>;
-    all(...params: any[]): Promise<any[]>;
-    run(...params: any[]): Promise<{ lastInsertRowid: number; changes: number }>;
-  };
+  prepare(sql: string): PreparedStatement;
   transaction: <T>(fn: () => Promise<T>) => Promise<T>;
   exec(sql: string): Promise<void>;
-  updateClient(client: any, isExternal: boolean): void;
+  updateClient(client: DatabaseClient | null, isExternal: boolean): void;
 }
 
 export class DBWrapper {
-  private _client: any;
+  private _client: DatabaseClient | null;
   private _isExternal: boolean;
   private _isReconnecting = false;
   private _reconnectAttempts = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 3;
 
-  constructor(client: any, isExternal: boolean) {
+  constructor(client: DatabaseClient | null, isExternal: boolean) {
     this._client = client;
     this._isExternal = isExternal;
   }
 
-  updateClient(client: any, isExternal: boolean) {
+  updateClient(client: DatabaseClient | null, isExternal: boolean) {
     this._client = client;
     this._isExternal = isExternal;
     this._reconnectAttempts = 0;
   }
 
-  get client() { 
+  get client(): DatabaseClient { 
     if (!this._client && !this._isExternal) {
       // In production, NEVER fall back to PGlite
       if (process.env.NODE_ENV === 'production') {
@@ -325,7 +418,7 @@ export class DBWrapper {
       }
       this._client = createPgliteClient();
     }
-    return this._client; 
+    return this._client as DatabaseClient; 
   }
 
   get isExternal() { return this._isExternal; }
@@ -398,7 +491,7 @@ export class DBWrapper {
           this._reconnectAttempts++;
           try {
             // Try to close old client if possible
-            try { await this._client.close(); } catch (e) {}
+            try { await this._client?.close?.(); } catch (e) {}
             
             this._client = createPgliteClient(true);
             await this._client.waitReady;
@@ -415,7 +508,7 @@ export class DBWrapper {
     }
   }
 
-  prepare(sql: string) {
+  prepare(sql: string): PreparedStatement {
     let counter = 1;
     const pgSql = sql.replace(/\?/g, () => `$${counter++}`);
     
@@ -423,7 +516,10 @@ export class DBWrapper {
       .replace(/\(user, action, module, details\)/gi, '("user", action, module, details)')
       .replace(/id, user, action, module/gi, 'id, "user", action, module');
       
-    const executeWithRetry = async (operation: (conn: any) => Promise<any>, retryCount = 0): Promise<any> => {
+    const executeWithRetry = async (
+      operation: (conn: DBConnection) => Promise<DBQueryResult>,
+      retryCount = 0
+    ): Promise<DBQueryResult> => {
       const connection = als.getStore() || this.client;
       try {
         return await operation(connection);
@@ -443,7 +539,7 @@ export class DBWrapper {
     };
 
     return {
-      get: async (...params: any[]) => {
+      get: async <T = unknown>(...params: DBParam[]): Promise<T | undefined> => {
         const unlock = this.isExternal ? () => {} : await dbLock.acquireRead();
         try {
           await this.ensureReady();
@@ -451,15 +547,15 @@ export class DBWrapper {
           const res = await executeWithRetry(conn => conn.query(convertedSql, params));
           const durationMs = performance.now() - startTime;
           checkSlowQuery(convertedSql, durationMs);
-          return res.rows ? res.rows[0] : undefined;
+          return (res.rows ? res.rows[0] : undefined) as T | undefined;
         } catch (error) {
           console.error(`[DB ERROR] GET: ${convertedSql}`, error);
-          throw error;
+          throw normalizePoolError(error);
         } finally {
           unlock();
         }
       },
-      all: async (...params: any[]) => {
+      all: async <T = unknown>(...params: DBParam[]): Promise<T[]> => {
         const unlock = this.isExternal ? () => {} : await dbLock.acquireRead();
         try {
           await this.ensureReady();
@@ -467,15 +563,15 @@ export class DBWrapper {
           const res = await executeWithRetry(conn => conn.query(convertedSql, params));
           const durationMs = performance.now() - startTime;
           checkSlowQuery(convertedSql, durationMs);
-          return res.rows || [];
+          return (res.rows || []) as T[];
         } catch (error) {
           console.error(`[DB ERROR] ALL: ${convertedSql}`, error);
-          throw error;
+          throw normalizePoolError(error);
         } finally {
           unlock();
         }
       },
-      run: async (...params: any[]) => {
+      run: async (...params: DBParam[]): Promise<RunResult> => {
         const unlock = this.isExternal ? () => {} : await dbLock.acquireWrite();
         try {
           await this.ensureReady();
@@ -489,8 +585,9 @@ export class DBWrapper {
                   const res = await executeWithRetry(conn => conn.query(finalSql, params));
                   const durationMs = performance.now() - startTime;
                   checkSlowQuery(finalSql, durationMs);
+                  const insertedRow = res.rows ? (res.rows[0] as DBRow | undefined) : undefined;
                   return { 
-                    lastInsertRowid: (res.rows && res.rows[0] as any)?.id || 0, 
+                    lastInsertRowid: ((insertedRow?.id as number) || 0), 
                     changes: res.rowCount || 0 
                   };
               } catch (e: any) {
@@ -508,7 +605,7 @@ export class DBWrapper {
           if (!(error as any).message?.includes('does not exist')) {
             console.error(`[DB ERROR] RUN: ${convertedSql}`, error);
           }
-          throw error;
+          throw normalizePoolError(error);
         } finally {
           unlock();
         }
@@ -525,7 +622,13 @@ export class DBWrapper {
         let needsRelease = false;
         
         if (this.isExternal) {
-          connection = await this.client.connect();
+          try {
+            connection = await this.client.connect!();
+          } catch (acquireErr) {
+            // Surface pool-acquisition timeouts as a returned error without
+            // terminating the process (Req 2.4).
+            throw normalizePoolError(acquireErr);
+          }
           needsRelease = true;
         }
 
@@ -550,17 +653,25 @@ export class DBWrapper {
         };
 
         return await als.run(connection, async () => {
-          try {
-            await executeWithRetry('BEGIN');
-            const result = await fn();
-            await executeWithRetry('COMMIT');
-            return result;
-          } catch (e) {
-            try { await executeWithRetry('ROLLBACK'); } catch (rollbackErr) {}
-            throw e;
-          } finally {
-            if (needsRelease) connection.release();
-          }
+          return await runWithEventBuffer(async () => {
+            try {
+              await executeWithRetry('BEGIN');
+              const result = await fn();
+              await executeWithRetry('COMMIT');
+              // Transaction committed: dispatch the events buffered during the
+              // transaction body, in order, and release the buffer (Req 20.2, 20.5).
+              await flushOnCommit();
+              return result;
+            } catch (e) {
+              try { await executeWithRetry('ROLLBACK'); } catch (rollbackErr) {}
+              // Transaction rolled back: discard every buffered event so none of
+              // them are ever dispatched (Req 20.3).
+              discardOnRollback();
+              throw e;
+            } finally {
+              if (needsRelease) connection.release?.();
+            }
+          });
         });
       } finally {
         unlock();
@@ -606,6 +717,45 @@ export class DBWrapper {
 }
 
 export const db: IDBWrapper = new DBWrapper(client, isExternal);
+
+/**
+ * Detects whether an error represents a connection-pool acquisition timeout
+ * (all pooled connections in use and none became available within the
+ * configured acquisition timeout) and, if so, returns a normalized error that
+ * clearly indicates a pool acquisition timeout. Non-timeout errors are returned
+ * unchanged. The process is never terminated for these errors (Req 2.4).
+ */
+/**
+ * A database error that has been classified by {@link normalizePoolError}.
+ * Carries an optional machine-readable `code`, an HTTP `statusCode`, and the
+ * originating error in `cause`.
+ */
+export interface NormalizedDbError extends Error {
+  code?: string;
+  statusCode?: number;
+  cause?: unknown;
+}
+
+export function normalizePoolError(err: unknown): NormalizedDbError {
+  const source = (err ?? null) as { message?: unknown; code?: unknown } | null;
+  const message = String(source?.message ?? "").toLowerCase();
+  const isAcquisitionTimeout =
+    message.includes("timeout exceeded when trying to connect") ||
+    message.includes("connection terminated due to connection timeout") ||
+    source?.code === "POOL_ACQUISITION_TIMEOUT";
+
+  if (!isAcquisitionTimeout) {
+    return err as NormalizedDbError;
+  }
+
+  const normalized: NormalizedDbError = new Error(
+    "pool acquisition timeout: a database connection did not become available within the configured acquisition timeout"
+  );
+  normalized.code = "POOL_ACQUISITION_TIMEOUT";
+  normalized.statusCode = 503;
+  normalized.cause = err;
+  return normalized;
+}
 
 /**
  * Classifies a database connection error into a human-readable type.
@@ -681,34 +831,91 @@ async function connectWithRetry(pool: any, maxRetries: number, retryIntervalMs: 
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+/** Hard budget for establishing the external PostgreSQL connection (Req 1.5). */
+const EXTERNAL_CONNECT_BUDGET_MS = 30_000;
+
+/**
+ * Remaining connection budget measured from process startup (Req 1.5).
+ * Never returns less than 0.
+ */
+function remainingConnectBudgetMs(): number {
+  const elapsedSinceStart = process.uptime() * 1000;
+  return Math.max(0, EXTERNAL_CONNECT_BUDGET_MS - elapsedSinceStart);
+}
+
 export const initDb = async () => {
-  // In production, PGlite must NEVER be used
-  if (isProduction && !isExternal) {
-    const target = getTargetServerAddress();
+  // Fail-fast: a rejected pool-configuration variable aborts startup before any
+  // port binding, naming the variable and its accepted range (Req 2.3).
+  if (poolConfigError) {
     console.error(
-      `[DB] FATAL: No PostgreSQL connection configured in production (target: ${target}). ` +
-      `DATABASE_URL is missing or invalid. PGlite cannot be used in production.`
+      `[DB] FATAL: Invalid connection-pool configuration. ` +
+      `Variable ${poolConfigError.variable} must be ${poolConfigError.acceptedRange}. ` +
+      `Received: "${poolConfigError.received}". Refusing to start.`
     );
     process.exit(1);
   }
 
-  if (DATABASE_URL && isExternal) {
+  // Whether the operator has explicitly opted in to the embedded DB. When true,
+  // PGlite is permitted regardless of NODE_ENV (Req 1.3).
+  const embeddedAllowed = isEmbeddedDbAllowed(process.env);
+
+  // Fail-fast in production: an unset/whitespace or http(s) DATABASE_URL is a
+  // fatal misconfiguration unless embedded DB is explicitly allowed
+  // (Req 1.1, 1.2). PGlite is never initialized in this case.
+  if (isProduction && !isExternal && !embeddedAllowed) {
+    const target = getTargetServerAddress();
+    console.error(
+      `[DB] FATAL: Invalid DATABASE_URL in production (classification: ${dbUrlClassification.kind}; target: ${target}). ` +
+      `DATABASE_URL must reference an external PostgreSQL instance. ` +
+      `PGlite cannot be used in production unless ALLOW_EMBEDDED_DB="true". Refusing to start.`
+    );
+    process.exit(1);
+  }
+
+  if (isExternal) {
     if (isProduction) {
-      // Production: validate SSL connection with retry logic (3 attempts, 2s intervals)
+      // Production: validate the external connection within a hard 30s budget
+      // measured from process startup (Req 1.5). Retry count x interval stays
+      // well within the budget, and the overall attempt is bounded by a race
+      // against the remaining budget so a hung connection cannot exceed it.
       const MAX_RETRIES = 3;
       const RETRY_INTERVAL_MS = 2000;
 
-      // First validate SSL if applicable
       try {
-        const { success, lastError } = await connectWithRetry(client, MAX_RETRIES, RETRY_INTERVAL_MS);
+        const budgetMs = remainingConnectBudgetMs();
+        let budgetTimer: NodeJS.Timeout | undefined;
+        const budgetPromise = new Promise<{ budgetExceeded: true }>((resolve) => {
+          budgetTimer = setTimeout(
+            () => resolve({ budgetExceeded: true }),
+            budgetMs
+          );
+        });
 
-        if (!success) {
-          const errorType = classifyConnectionError(lastError);
+        const connectPromise = connectWithRetry(
+          client,
+          MAX_RETRIES,
+          RETRY_INTERVAL_MS
+        ).then((result) => ({ budgetExceeded: false as const, ...result }));
+
+        const raced = await Promise.race([connectPromise, budgetPromise]);
+        if (budgetTimer) clearTimeout(budgetTimer);
+
+        if (raced.budgetExceeded) {
+          const target = getTargetServerAddress();
+          console.error(
+            `[DB] FATAL: PostgreSQL connection not established within the ${EXTERNAL_CONNECT_BUDGET_MS / 1000}s startup budget. ` +
+            `Target: ${target}. Refusing to start without an external database (PGlite is not created).`
+          );
+          process.exit(1);
+        }
+
+        if (!raced.success) {
+          const errorType = classifyConnectionError(raced.lastError);
           const target = getTargetServerAddress();
           console.error(
             `[DB] FATAL: PostgreSQL connection failed after ${MAX_RETRIES} attempts. ` +
             `Error type: ${errorType}. Target: ${target}. ` +
-            `Last error: ${lastError?.message || String(lastError)}`
+            `Last error: ${raced.lastError?.message || String(raced.lastError)}`
           );
           process.exit(1);
         }
@@ -718,7 +925,7 @@ export const initDb = async () => {
           await validateSSLConnection(client);
           console.log("[DB] Production PostgreSQL connection validated successfully.");
           // Initialize pool metrics monitoring
-          initDbMetrics(client);
+          initDbMetrics(getPool()!);
         } catch (sslErr: any) {
           const target = getTargetServerAddress();
           console.error(
@@ -739,18 +946,20 @@ export const initDb = async () => {
     } else {
       // Non-production: attempt connection, fall back to PGlite if it fails
       try {
-        await client.query('SELECT 1');
+        await client!.query('SELECT 1');
         console.log("[DB] External PostgreSQL connection established.");
         // Initialize pool metrics monitoring for non-production
-        initDbMetrics(client);
+        initDbMetrics(getPool()!);
       } catch (err: any) {
         console.error("[DB] External PostgreSQL connection failed. Falling back to PGlite.", err.message);
         const pgliteClient = createPgliteClient();
         db.updateClient(pgliteClient, false);
       }
     }
-  } else if (!isExternal) {
-    // Non-production PGlite initialization
+  } else {
+    // No external pool: initialize PGlite. Reachable only in non-production, or
+    // when embedded DB is explicitly allowed via ALLOW_EMBEDDED_DB="true"
+    // (Req 1.2, 1.3); the production guard above has already exited otherwise.
     try {
       if (db.client.waitReady) {
         await db.client.waitReady;

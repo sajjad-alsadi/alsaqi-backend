@@ -432,4 +432,104 @@ describe('FileEncryptionService', () => {
       expect(unencMeta?.keyVersion).toBe(0);
     });
   });
+
+  describe('createDecryptStream', () => {
+    /** Drains a readable stream into a single Buffer. */
+    async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+      }
+      return Buffer.concat(chunks);
+    }
+
+    it('should stream-decrypt an encrypted file back to the original plaintext', async () => {
+      const buffer = Buffer.from('Streaming decryption round-trip content.');
+      const input = {
+        fileId: 'stream-001',
+        originalName: 'doc.txt',
+        mimeType: 'text/plain',
+        size: buffer.length,
+        keyVersion: 1,
+      };
+      await service.encryptFile(buffer, input);
+
+      const { stream, metadata } = await service.createDecryptStream('stream-001');
+      const decrypted = await collect(stream);
+
+      expect(decrypted.equals(buffer)).toBe(true);
+      expect(metadata.fileId).toBe('stream-001');
+    });
+
+    it('should emit decrypted chunks of at most 64 KB', async () => {
+      // 200 KB of data forces multiple chunks.
+      const buffer = crypto.randomBytes(200 * 1024);
+      await service.encryptFile(buffer, {
+        fileId: 'stream-large',
+        originalName: 'big.bin',
+        mimeType: 'application/octet-stream',
+        size: buffer.length,
+        keyVersion: 1,
+      });
+
+      const { stream } = await service.createDecryptStream('stream-large');
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+        expect(buf.length).toBeLessThanOrEqual(64 * 1024);
+        chunks.push(buf);
+      }
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(Buffer.concat(chunks).equals(buffer)).toBe(true);
+    });
+
+    it('should error the stream when the auth tag/ciphertext is tampered with', async () => {
+      const buffer = Buffer.from('Tamper detection content for GCM auth tag.');
+      const { path: encPath } = await service.encryptFile(buffer, {
+        fileId: 'stream-tamper',
+        originalName: 'secret.txt',
+        mimeType: 'text/plain',
+        size: buffer.length,
+        keyVersion: 1,
+      });
+
+      // Flip a byte in the ciphertext region (after the 28-byte header).
+      const fileData = await fs.promises.readFile(encPath);
+      fileData[fileData.length - 1] ^= 0xff;
+      await fs.promises.writeFile(encPath, fileData);
+
+      const { stream } = await service.createDecryptStream('stream-tamper');
+      await expect(
+        (async () => {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          for await (const _chunk of stream) {
+            // drain until final() verifies the auth tag and throws
+          }
+        })()
+      ).rejects.toThrow();
+    });
+
+    it('should stream an unencrypted (passthrough) file as-is', async () => {
+      delete process.env.FILE_ENCRYPTION_KEY;
+      const passService = new FileEncryptionService(tmpDir);
+      const buffer = Buffer.from('Plain passthrough content');
+      await passService.encryptFile(buffer, {
+        fileId: 'stream-plain',
+        originalName: 'plain.txt',
+        mimeType: 'text/plain',
+        size: buffer.length,
+        keyVersion: 0,
+      });
+
+      const { stream } = await passService.createDecryptStream('stream-plain');
+      const out = await collect(stream);
+      expect(out.equals(buffer)).toBe(true);
+    });
+
+    it('should throw when metadata is missing', async () => {
+      await expect(service.createDecryptStream('does-not-exist')).rejects.toThrow(
+        /metadata not found/i
+      );
+    });
+  });
 });

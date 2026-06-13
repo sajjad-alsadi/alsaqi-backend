@@ -141,7 +141,7 @@ export class PartitionManager {
     // Step 3: Migrate existing data
     const existingData = await db.prepare(
       `SELECT COUNT(*) as count FROM audit_trail`
-    ).get();
+    ).get<{ count: number }>();
 
     if (existingData && existingData.count > 0) {
       logger.info(`[PartitionManager] Migrating ${existingData.count} rows to partitioned table...`);
@@ -149,7 +149,7 @@ export class PartitionManager {
       // Create partitions for any historical data that might exist
       const oldestRow = await db.prepare(
         `SELECT MIN(timestamp) as min_ts FROM audit_trail`
-      ).get();
+      ).get<{ min_ts: string | Date | null }>();
 
       if (oldestRow?.min_ts) {
         const oldestDate = new Date(oldestRow.min_ts);
@@ -239,7 +239,7 @@ export class PartitionManager {
       FROM pg_inherits
       WHERE inhparent = 'audit_trail'::regclass
       ORDER BY inhrelid::regclass::text
-    `).all();
+    `).all<{ partition_name: string }>();
 
     const partitions: PartitionInfo[] = [];
     for (const row of rows) {
@@ -308,7 +308,7 @@ export class PartitionManager {
     try {
       const result = await db.prepare(`
         SELECT relkind FROM pg_class WHERE relname = 'audit_trail'
-      `).get();
+      `).get<{ relkind: string }>();
       // 'p' means partitioned table
       return result?.relkind === 'p';
     } catch {

@@ -151,6 +151,11 @@ describe('Property 17: Environment Variable Validation', () => {
 
       const validNetworkSecrets = fc.string({ minLength: 10, maxLength: 64 });
 
+      // FILE_ACCESS_SECRET must be >= 32 chars (Req 9.2)
+      const validFileAccessSecrets = fc.string({ minLength: 32, maxLength: 64 }).map(
+        (s) => s.padEnd(32, 'z') // ensure minimum length
+      );
+
       fc.assert(
         fc.property(
           validDatabaseUrls,
@@ -159,7 +164,8 @@ describe('Property 17: Environment Variable Validation', () => {
           validJwtSecrets,
           validStorageSecrets,
           validNetworkSecrets,
-          (dbUrl, redisUrl, corsOrigin, jwtSecret, storageSecret, networkSecret) => {
+          validFileAccessSecrets,
+          (dbUrl, redisUrl, corsOrigin, jwtSecret, storageSecret, networkSecret, fileAccessSecret) => {
             const env: Record<string, string> = {
               NODE_ENV: 'production',
               DATABASE_URL: dbUrl,
@@ -168,6 +174,7 @@ describe('Property 17: Environment Variable Validation', () => {
               JWT_SECRET: jwtSecret,
               VITE_STORAGE_SECRET: storageSecret,
               VITE_NETWORK_SECRET: networkSecret,
+              FILE_ACCESS_SECRET: fileAccessSecret,
             };
 
             const result = validateEnvironment(env, true);

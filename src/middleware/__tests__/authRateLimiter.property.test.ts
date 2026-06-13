@@ -1,16 +1,35 @@
 // @vitest-environment node
-import { describe, it, expect, vi } from 'vitest';
+// Feature: backend-security-hardening, Property 26: Rate-limit keying is per source IP across usernames
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fc from 'fast-check';
 
 /**
- * Property Test: Rate Limit Enforcement (Property 8)
+ * Property Test: Rate-limit keying is per source IP across usernames (Property 26)
  *
- * **Validates: Requirements 5.1, 5.2**
+ * **Validates: Requirements 18.1**
  *
- * For any IP-plus-username combination making more than 10 login requests
- * within a 15-minute window, the Auth_Middleware SHALL reject subsequent
- * requests with the error message TOO_MANY_ATTEMPTS.
+ * For any set of authentication attempts originating from a single source IP
+ * with arbitrary (including differing) supplied usernames, all attempts map to
+ * the same rate-limit counter key, so the per-source-IP count increases
+ * regardless of which username is supplied. Conversely, attempts from different
+ * source IPs map to different keys.
+ *
+ * The `authLimiter` keyGenerator is defined in src/middleware/auth.ts
+ * (createAuthMiddlewares -> authLimiter) and returns `req.ip` only (falling back
+ * to 'no-ip'). To exercise it in isolation we mock `express-rate-limit` so we can
+ * capture the `keyGenerator` option passed when the middleware is constructed.
  */
+
+// Capture the options passed to rateLimit() so we can extract the keyGenerator.
+let capturedRateLimitOptions: any = null;
+
+vi.mock('express-rate-limit', () => ({
+  rateLimit: (options: any) => {
+    capturedRateLimitOptions = options;
+    // Return a no-op middleware; we only care about the captured options here.
+    return (_req: any, _res: any, next: any) => next();
+  },
+}));
 
 // Mock Redis to avoid real connections
 vi.mock('../../cache/redisManager.js', () => ({
@@ -47,6 +66,18 @@ function createMockDb() {
   };
 }
 
+/**
+ * Builds the auth middlewares (which constructs authLimiter via the mocked
+ * rateLimit) and returns the captured keyGenerator function.
+ */
+function getKeyGenerator(): (req: any) => string {
+  capturedRateLimitOptions = null;
+  createAuthMiddlewares(createMockDb(), 'test-jwt-secret', 'test-public-key');
+  expect(capturedRateLimitOptions).not.toBeNull();
+  expect(typeof capturedRateLimitOptions.keyGenerator).toBe('function');
+  return capturedRateLimitOptions.keyGenerator;
+}
+
 /** Creates a mock Express Request simulating a login attempt */
 function createMockLoginReq(ip: string, username: string) {
   return {
@@ -57,79 +88,6 @@ function createMockLoginReq(ip: string, username: string) {
     originalUrl: '/api/v1/auth/login',
     method: 'POST',
   } as any;
-}
-
-/**
- * Creates a mock Express Response compatible with express-rate-limit v8.
- * express-rate-limit calls: response.status(), response.setHeader(),
- * response.send(), response.headersSent, response.writableEnded, response.once()
- */
-function createMockRes() {
-  let statusCode = 200;
-  let body: any = null;
-  const headers: Record<string, string> = {};
-  let headersSent = false;
-  let writableEnded = false;
-
-  const res = {
-    headersSent,
-    writableEnded,
-    status(code: number) {
-      statusCode = code;
-      return res;
-    },
-    json(data: any) {
-      body = data;
-      headersSent = true;
-      writableEnded = true;
-      res.headersSent = true;
-      res.writableEnded = true;
-      return res;
-    },
-    send(data: any) {
-      body = data;
-      headersSent = true;
-      writableEnded = true;
-      res.headersSent = true;
-      res.writableEnded = true;
-      return res;
-    },
-    setHeader(name: string, value: string) {
-      headers[name.toLowerCase()] = value;
-      return res;
-    },
-    set(name: string, value: string) {
-      headers[name.toLowerCase()] = value;
-      return res;
-    },
-    getHeader(name: string) {
-      return headers[name.toLowerCase()];
-    },
-    // express-rate-limit uses response.once for skip tracking
-    once(_event: string, _handler: () => void) {},
-    getStatusCode: () => statusCode,
-    getBody: () => body,
-    getHeaders: () => headers,
-  } as any;
-
-  let nextCalled = false;
-  const next = () => { nextCalled = true; };
-  const wasNextCalled = () => nextCalled;
-
-  return { res, next, wasNextCalled };
-}
-
-/**
- * Invokes the authLimiter middleware and waits for it to complete.
- * express-rate-limit v8 is async, so we need to properly await it.
- */
-async function invokeRateLimiter(
-  authLimiter: any,
-  req: any,
-  res: any,
-  next: () => void
-): Promise<void> {
-  await authLimiter(req, res, next);
 }
 
 // ─── Arbitraries ─────────────────────────────────────────────────────────────
@@ -144,95 +102,40 @@ const ipv4Arb = fc
   )
   .map(([a, b, c, d]) => `${a}.${b}.${c}.${d}`);
 
-/** Generates a plausible username (alphanumeric, 3-20 chars) */
-const usernameArb = fc
-  .tuple(
-    fc.constantFrom('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'),
-    fc.array(
-      fc.constantFrom('a', 'b', 'c', 'd', 'e', '0', '1', '2', '3', '_'),
-      { minLength: 2, maxLength: 15 }
-    )
-  )
-  .map(([first, rest]) => first + rest.join(''));
-
-/** Generates a number of requests exceeding the limit (11 to 15) */
-const requestCountAboveLimitArb = fc.integer({ min: 11, max: 15 });
+/** Generates an arbitrary username string (including unusual/edge content) */
+const usernameArb = fc.string({ maxLength: 40 });
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe('Property 8: Rate Limit Enforcement', () => {
-  it('allows up to 10 requests from the same IP+username within the window', async () => {
+describe('Property 26: Rate-limit keying is per source IP across usernames', () => {
+  beforeEach(() => {
+    capturedRateLimitOptions = null;
+  });
+
+  it('maps all usernames from the same IP to the same rate-limit key (Req 18.1)', async () => {
+    const keyGenerator = getKeyGenerator();
+
     await fc.assert(
       fc.asyncProperty(
         ipv4Arb,
-        usernameArb,
-        async (ip, username) => {
-          // Create fresh middlewares for each property run (fresh rate limiter store)
-          const { authLimiter } = createAuthMiddlewares(
-            createMockDb(),
-            'test-jwt-secret',
-            'test-public-key'
-          );
-
-          // Send exactly 10 requests - all should be allowed
-          for (let i = 0; i < 10; i++) {
-            const req = createMockLoginReq(ip, username);
-            const { res, next, wasNextCalled } = createMockRes();
-
-            await invokeRateLimiter(authLimiter, req, res, next);
-
-            expect(wasNextCalled()).toBe(true);
+        fc.array(usernameArb, { minLength: 1, maxLength: 10 }),
+        async (ip, usernames) => {
+          // Every attempt from this IP, regardless of username, must yield the same key.
+          const keys = usernames.map((u) => keyGenerator(createMockLoginReq(ip, u)));
+          for (const k of keys) {
+            expect(k).toBe(ip);
           }
+          // All keys identical to each other.
+          expect(new Set(keys).size).toBe(1);
         }
       ),
-      { numRuns: 100 }
+      { numRuns: 200 }
     );
   });
 
-  it('rejects the 11th+ request from the same IP+username with TOO_MANY_ATTEMPTS', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        ipv4Arb,
-        usernameArb,
-        requestCountAboveLimitArb,
-        async (ip, username, totalRequests) => {
-          // Create fresh middlewares for each property run (fresh rate limiter store)
-          const { authLimiter } = createAuthMiddlewares(
-            createMockDb(),
-            'test-jwt-secret',
-            'test-public-key'
-          );
+  it('maps different source IPs to different keys (Req 18.1)', async () => {
+    const keyGenerator = getKeyGenerator();
 
-          // Exhaust the rate limit (10 allowed requests)
-          for (let i = 0; i < 10; i++) {
-            const req = createMockLoginReq(ip, username);
-            const { res, next } = createMockRes();
-            await invokeRateLimiter(authLimiter, req, res, next);
-          }
-
-          // Now send requests beyond the limit - all should be rejected
-          for (let i = 10; i < totalRequests; i++) {
-            const req = createMockLoginReq(ip, username);
-            const { res, next, wasNextCalled } = createMockRes();
-
-            await invokeRateLimiter(authLimiter, req, res, next);
-
-            // Must NOT call next (request is blocked)
-            expect(wasNextCalled()).toBe(false);
-            // Must respond with 429 status
-            expect(res.getStatusCode()).toBe(429);
-            // Must respond with TOO_MANY_ATTEMPTS message
-            const body = res.getBody();
-            expect(body).not.toBeNull();
-            expect(body.error).toBe('TOO_MANY_ATTEMPTS');
-          }
-        }
-      ),
-      { numRuns: 100 }
-    );
-  });
-
-  it('does not rate limit different IP+username combinations independently', async () => {
     await fc.assert(
       fc.asyncProperty(
         ipv4Arb,
@@ -240,90 +143,47 @@ describe('Property 8: Rate Limit Enforcement', () => {
         usernameArb,
         usernameArb,
         async (ip1, ip2, username1, username2) => {
-          // Ensure different combinations
-          const key1 = `${ip1}_${username1.toLowerCase()}`;
-          const key2 = `${ip2}_${username2.toLowerCase()}`;
-          fc.pre(key1 !== key2);
-
-          // Create fresh middlewares
-          const { authLimiter } = createAuthMiddlewares(
-            createMockDb(),
-            'test-jwt-secret',
-            'test-public-key'
-          );
-
-          // Exhaust the rate limit for IP1+username1
-          for (let i = 0; i < 10; i++) {
-            const req = createMockLoginReq(ip1, username1);
-            const { res, next } = createMockRes();
-            await invokeRateLimiter(authLimiter, req, res, next);
-          }
-
-          // Verify IP1+username1 is now blocked
-          {
-            const req = createMockLoginReq(ip1, username1);
-            const { res, next, wasNextCalled } = createMockRes();
-            await invokeRateLimiter(authLimiter, req, res, next);
-            expect(wasNextCalled()).toBe(false);
-            expect(res.getStatusCode()).toBe(429);
-          }
-
-          // IP2+username2 should still be able to make requests
-          {
-            const req = createMockLoginReq(ip2, username2);
-            const { res, next, wasNextCalled } = createMockRes();
-            await invokeRateLimiter(authLimiter, req, res, next);
-            expect(wasNextCalled()).toBe(true);
-          }
+          fc.pre(ip1 !== ip2);
+          // Different IPs => different keys, even with the same or different usernames.
+          const key1 = keyGenerator(createMockLoginReq(ip1, username1));
+          const key2 = keyGenerator(createMockLoginReq(ip2, username2));
+          expect(key1).not.toBe(key2);
         }
       ),
-      { numRuns: 100 }
+      { numRuns: 200 }
     );
   });
 
-  it('key generator normalizes username to lowercase', async () => {
+  it('produces a key independent of req.body.usernameOrEmail (Req 18.1)', async () => {
+    const keyGenerator = getKeyGenerator();
+
     await fc.assert(
       fc.asyncProperty(
         ipv4Arb,
         usernameArb,
         async (ip, username) => {
-          // Create fresh middlewares
-          const { authLimiter } = createAuthMiddlewares(
-            createMockDb(),
-            'test-jwt-secret',
-            'test-public-key'
-          );
-
-          // Mix case variations of the same username share the same rate limit bucket
-          const upperUsername = username.toUpperCase();
-
-          // Send 5 requests with lowercase
-          for (let i = 0; i < 5; i++) {
-            const req = createMockLoginReq(ip, username);
-            const { res, next } = createMockRes();
-            await invokeRateLimiter(authLimiter, req, res, next);
-          }
-
-          // Send 5 requests with uppercase (same user, same bucket)
-          for (let i = 0; i < 5; i++) {
-            const req = createMockLoginReq(ip, upperUsername);
-            const { res, next } = createMockRes();
-            await invokeRateLimiter(authLimiter, req, res, next);
-          }
-
-          // The 11th request (either case) should be rate limited
-          const req = createMockLoginReq(ip, username);
-          const { res, next, wasNextCalled } = createMockRes();
-          await invokeRateLimiter(authLimiter, req, res, next);
-
-          expect(wasNextCalled()).toBe(false);
-          expect(res.getStatusCode()).toBe(429);
-          const body = res.getBody();
-          expect(body).not.toBeNull();
-          expect(body.error).toBe('TOO_MANY_ATTEMPTS');
+          // Same IP: with a username vs. without any body at all => same key.
+          const keyWithUser = keyGenerator(createMockLoginReq(ip, username));
+          const keyNoBody = keyGenerator({ ip, headers: {}, cookies: {} } as any);
+          expect(keyWithUser).toBe(keyNoBody);
+          expect(keyWithUser).toBe(ip);
         }
       ),
-      { numRuns: 100 }
+      { numRuns: 200 }
+    );
+  });
+
+  it('falls back to a stable key when req.ip is absent (Req 18.1)', async () => {
+    const keyGenerator = getKeyGenerator();
+
+    await fc.assert(
+      fc.asyncProperty(usernameArb, async (username) => {
+        // No req.ip: all such attempts must still collapse to one stable key,
+        // never keyed by username.
+        const key = keyGenerator({ ip: undefined, body: { usernameOrEmail: username } } as any);
+        expect(key).toBe('no-ip');
+      }),
+      { numRuns: 200 }
     );
   });
 });

@@ -43,7 +43,24 @@ export interface NotificationJobData {
 export interface QueueManagerOptions {
   /** Redis connection URL (defaults to process.env.REDIS_URL) */
   redisUrl?: string;
+  /**
+   * Raw failed-job retention value (defaults to process.env.QUEUE_FAILED_RETENTION).
+   * Parsed and validated via {@link parseFailedJobRetention}; an invalid value is
+   * rejected and the default retention limit is retained.
+   */
+  failedJobRetention?: string;
 }
+
+/**
+ * Result of parsing a failed-job retention configuration value.
+ * On success, carries the validated retention `limit` (1..100000).
+ * On failure, carries a human-readable `reason` describing why it was rejected.
+ *
+ * Validates: Requirements 21.1, 21.3
+ */
+export type FailedJobRetentionResult =
+  | { ok: true; limit: number }
+  | { ok: false; reason: string };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -73,6 +90,59 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   removeOnFail: false, // Keep failed jobs for inspection
 };
 
+// ─── Failed-Job Retention (Requirement 21) ─────────────────────────────────────
+
+/** Inclusive lower bound for the failed-job retention limit (Req 21.1). */
+export const FAILED_RETENTION_MIN = 1;
+
+/** Inclusive upper bound for the failed-job retention limit (Req 21.1). */
+export const FAILED_RETENTION_MAX = 100_000;
+
+/** Default failed-job retention limit applied when no value is provided (Req 21.1). */
+export const FAILED_RETENTION_DEFAULT = 1000;
+
+/** Matches a base-10 integer with no decimal point, exponent, or stray characters. */
+const FAILED_RETENTION_INTEGER_PATTERN = /^[+-]?\d+$/;
+
+/**
+ * Pure parser for the failed-job retention limit (Requirements 21.1, 21.3).
+ *
+ * - An unset value (`undefined`) or one that trims to empty resolves to the
+ *   documented default of {@link FAILED_RETENTION_DEFAULT} (Req 21.1).
+ * - A present value must be an integer within
+ *   {@link FAILED_RETENTION_MIN}..{@link FAILED_RETENTION_MAX}; non-numeric or
+ *   out-of-range values are rejected with a descriptive reason (Req 21.3).
+ *
+ * No side effects so it can be unit- and property-tested in isolation.
+ */
+export function parseFailedJobRetention(raw: string | undefined): FailedJobRetentionResult {
+  if (raw === undefined) {
+    return { ok: true, limit: FAILED_RETENTION_DEFAULT };
+  }
+
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return { ok: true, limit: FAILED_RETENTION_DEFAULT };
+  }
+
+  if (!FAILED_RETENTION_INTEGER_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      reason: `QUEUE_FAILED_RETENTION must be an integer ${FAILED_RETENTION_MIN}..${FAILED_RETENTION_MAX}; received "${raw}"`,
+    };
+  }
+
+  const value = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(value) || value < FAILED_RETENTION_MIN || value > FAILED_RETENTION_MAX) {
+    return {
+      ok: false,
+      reason: `QUEUE_FAILED_RETENTION must be an integer ${FAILED_RETENTION_MIN}..${FAILED_RETENTION_MAX}; received "${raw}"`,
+    };
+  }
+
+  return { ok: true, limit: value };
+}
+
 /**
  * Stalled job interval in milliseconds (5 minutes).
  * Jobs not completing within this time are considered stalled and re-queued.
@@ -95,6 +165,12 @@ export class QueueManager {
   private workers: Worker[] = [];
   private readonly redisConnection: ConnectionOptions;
   private initialized = false;
+  /**
+   * Currently applied, validated failed-job retention limit (Req 21.1, 21.3).
+   * Seeded with the documented default and only ever replaced by a valid value,
+   * so an invalid configuration retains the previously applied valid limit.
+   */
+  private failedRetentionLimit: number = FAILED_RETENTION_DEFAULT;
 
   constructor(options: QueueManagerOptions = {}) {
     const redisUrl = options.redisUrl || process.env.REDIS_URL || '';
@@ -105,6 +181,17 @@ export class QueueManager {
 
     // Parse Redis URL into connection options for BullMQ
     this.redisConnection = this.parseRedisUrl(redisUrl);
+
+    // Apply the configured failed-job retention limit. An invalid value is
+    // rejected and the default limit is retained (Req 21.3).
+    const rawRetention = options.failedJobRetention ?? process.env.QUEUE_FAILED_RETENTION;
+    const result = this.setFailedJobRetention(rawRetention);
+    if (!result.ok) {
+      logger.warn(
+        `[QueueManager] Invalid failed-job retention configuration: ${result.reason}. ` +
+        `Retaining previously applied limit of ${this.failedRetentionLimit}.`
+      );
+    }
   }
 
   /**
@@ -132,6 +219,41 @@ export class QueueManager {
   }
 
   /**
+   * Apply a failed-job retention configuration value (Requirements 21.1, 21.3).
+   *
+   * On a valid value (an integer in {@link FAILED_RETENTION_MIN}..
+   * {@link FAILED_RETENTION_MAX}, or unset → default), the applied limit is
+   * updated and an `ok` result is returned. On an invalid value the previously
+   * applied valid limit is retained and an error result is returned; the queue
+   * configuration is otherwise rejected by the caller.
+   */
+  setFailedJobRetention(raw: string | undefined): FailedJobRetentionResult {
+    const result = parseFailedJobRetention(raw);
+    if (result.ok) {
+      this.failedRetentionLimit = result.limit;
+    }
+    return result;
+  }
+
+  /** The currently applied, validated failed-job retention limit (Req 21.1). */
+  getFailedRetentionLimit(): number {
+    return this.failedRetentionLimit;
+  }
+
+  /**
+   * Build the default job options for this manager, binding the bounded
+   * failed-job retention so BullMQ keeps at most the configured number of
+   * failed jobs and evicts the oldest first (Req 21.1, 21.2).
+   */
+  private buildJobOptions(overrides?: Partial<JobsOptions>): JobsOptions {
+    return {
+      ...DEFAULT_JOB_OPTIONS,
+      removeOnFail: { count: this.failedRetentionLimit },
+      ...overrides,
+    };
+  }
+
+  /**
    * Initialize all queues and queue event listeners.
    * Must be called before adding jobs.
    */
@@ -150,17 +272,13 @@ export class QueueManager {
       // Create the PDF generation queue
       this.pdfQueue = new Queue<PdfJobData>(QUEUE_NAMES.PDF_GENERATION, {
         connection: this.redisConnection,
-        defaultJobOptions: {
-          ...DEFAULT_JOB_OPTIONS,
-        },
+        defaultJobOptions: this.buildJobOptions(),
       });
 
       // Create the notifications queue
       this.notificationsQueue = new Queue<NotificationJobData>(QUEUE_NAMES.NOTIFICATIONS, {
         connection: this.redisConnection,
-        defaultJobOptions: {
-          ...DEFAULT_JOB_OPTIONS,
-        },
+        defaultJobOptions: this.buildJobOptions(),
       });
 
       // Set up queue event listeners for monitoring
@@ -288,10 +406,7 @@ export class QueueManager {
       throw new Error('[QueueManager] PDF queue not initialized. Call initialize() first.');
     }
 
-    const job = await this.pdfQueue.add('generate-pdf', data, {
-      ...DEFAULT_JOB_OPTIONS,
-      ...options,
-    });
+    const job = await this.pdfQueue.add('generate-pdf', data, this.buildJobOptions(options));
 
     logger.info(`[QueueManager] PDF job ${job.id} added to queue for request ${data.requestId}.`);
     return job.id!;
@@ -310,10 +425,7 @@ export class QueueManager {
       throw new Error('[QueueManager] Notifications queue not initialized. Call initialize() first.');
     }
 
-    const job = await this.notificationsQueue.add('send-notification', data, {
-      ...DEFAULT_JOB_OPTIONS,
-      ...options,
-    });
+    const job = await this.notificationsQueue.add('send-notification', data, this.buildJobOptions(options));
 
     logger.info(
       `[QueueManager] Notification job ${job.id} added to queue for recipient ${data.recipientId}.`
