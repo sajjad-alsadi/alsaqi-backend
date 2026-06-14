@@ -72,7 +72,9 @@ const ACTIVE_USER = {
   username: 'alice',
   email: 'alice@example.com',
   password: '$2b$12$realhashvalueplaceholderxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-  status: 'active',
+  // Canonical schema status is 'Active' (users.status CHECK). Login now blocks every
+  // non-'Active' status via the shared isLoginBlockedStatus rule (Req 2.2).
+  status: 'Active',
   locked_until: null,
   failed_attempts: 0,
   role: 'admin',

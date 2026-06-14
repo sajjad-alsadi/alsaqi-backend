@@ -6,19 +6,24 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ValidationError, NotFoundError } from '../utils/errors';
 import { validateSchema } from '../middleware/validate';
 import { invalidateUserCache } from '../middleware/auth';
-import { UserRole } from '@alsaqi/shared';
+import { UserRole, AccessScope } from '@alsaqi/shared';
+import { DEFAULT_PASSWORD_MIN_LENGTH } from '../services/passwordPolicy';
 
 const userSchema = z.object({
   username: z.string().min(3).max(50).optional(),
-  password: z.string().min(6).max(100).optional(),
+  password: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100).optional(),
   name: z.string().min(1).max(100),
   email: z.string().email(),
   department: z.string().optional().nullable(),
   job_title_id: z.string().optional().nullable(),
-  role: z.string().min(1),
+  // Constrain role to the schema role enum so an out-of-enum value is rejected with HTTP 400
+  // before reaching the DB layer, instead of surfacing a raw constraint violation (Req 2.3).
+  role: z.nativeEnum(UserRole),
   unit: z.string().optional().nullable(),
   reporting_manager_id: z.string().optional().nullable(),
-  access_scope: z.string().optional().nullable(),
+  // Constrain access_scope to the schema-permitted values ('Global','Department','Unit'),
+  // while still allowing it to be omitted or null (Req 2.3).
+  access_scope: z.nativeEnum(AccessScope).optional().nullable(),
   phone_number: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   status: z.string().optional()
@@ -112,7 +117,7 @@ export const createUserRoutes = (
       }
     }
 
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Updated User", "User Management", `Updated user ID ${id}`);
       
     res.json({ success: true });
@@ -124,19 +129,22 @@ export const createUserRoutes = (
       return res.status(403).json({ error: "Cannot perform this action on your own account" });
     }
     const targetUser = await db.prepare("SELECT role FROM users WHERE id = ?").get(id) as any;
-    if (targetUser && targetUser.role === UserRole.ADMIN) {
+    const currentStatus = await UserService.getStatus(id);
+    const newStatus = currentStatus === 'Suspended' ? 'Active' : 'Suspended';
+    // The last-admin guard only applies when the action REMOVES an admin from active duty
+    // (i.e. suspending). Reactivating the sole suspended admin back to 'Active' must be allowed
+    // so the account is recoverable (Req 2.19).
+    if (newStatus !== 'Active' && targetUser && targetUser.role === UserRole.ADMIN) {
       const adminCount = await db.prepare(
-        `SELECT COUNT(*) as count FROM users WHERE role = '${UserRole.ADMIN}' AND status = 'Active' AND id != ?`
-      ).get(id) as any;
+        `SELECT COUNT(*) as count FROM users WHERE role = ? AND status = 'Active' AND id != ?`
+      ).get(UserRole.ADMIN, id) as any;
       if (!adminCount || adminCount.count === 0) {
         return res.status(403).json({ error: "Cannot remove the last admin user" });
       }
     }
-    const currentStatus = await UserService.getStatus(id);
-    const newStatus = currentStatus === 'Suspended' ? 'Active' : 'Suspended';
     const username = await UserService.setStatus(id, newStatus);
     
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, `${newStatus === 'Suspended' ? 'Suspended' : 'Activated'} User`, "User Management", `Changed status for user ${username} to ${newStatus}`);
       
     res.json({ success: true, status: newStatus });
@@ -150,14 +158,14 @@ export const createUserRoutes = (
     const targetUser = await db.prepare("SELECT role FROM users WHERE id = ?").get(id) as any;
     if (targetUser && targetUser.role === UserRole.ADMIN) {
       const adminCount = await db.prepare(
-        `SELECT COUNT(*) as count FROM users WHERE role = '${UserRole.ADMIN}' AND status = 'Active' AND id != ?`
-      ).get(id) as any;
+        `SELECT COUNT(*) as count FROM users WHERE role = ? AND status = 'Active' AND id != ?`
+      ).get(UserRole.ADMIN, id) as any;
       if (!adminCount || adminCount.count === 0) {
         return res.status(403).json({ error: "Cannot remove the last admin user" });
       }
     }
     const username = await UserService.setStatus(id, 'Archived');
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Archive", "User Management", `Archived user: ${username}`);
     res.json({ success: true });
   }));
@@ -165,7 +173,7 @@ export const createUserRoutes = (
   router.post(`/:id/activate`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const username = await UserService.activateUser(id);
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Activate", "User Management", `Activated user: ${username}`);
     res.json({ success: true });
   }));
@@ -178,14 +186,14 @@ export const createUserRoutes = (
     const targetUser = await db.prepare("SELECT role FROM users WHERE id = ?").get(id) as any;
     if (targetUser && targetUser.role === UserRole.ADMIN) {
       const adminCount = await db.prepare(
-        `SELECT COUNT(*) as count FROM users WHERE role = '${UserRole.ADMIN}' AND status = 'Active' AND id != ?`
-      ).get(id) as any;
+        `SELECT COUNT(*) as count FROM users WHERE role = ? AND status = 'Active' AND id != ?`
+      ).get(UserRole.ADMIN, id) as any;
       if (!adminCount || adminCount.count === 0) {
         return res.status(403).json({ error: "Cannot remove the last admin user" });
       }
     }
     const username = await UserService.deleteUser(id);
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Deleted User", "User Management", `Deleted user ${username}`);
     res.json({ success: true });
   }));
@@ -193,13 +201,13 @@ export const createUserRoutes = (
   router.post(`/:id/unlock`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const username = await UserService.unlockUser(id);
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Unlocked User", "User Management", `Unlocked user ${username} and reset failed attempts`);
     res.json({ success: true });
   }));
 
   const resetPasswordSchema = z.object({
-    newPassword: z.string().min(6).max(100)
+    newPassword: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100)
   });
 
   router.post(`/:id/reset-password`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
@@ -211,7 +219,7 @@ export const createUserRoutes = (
     const { newPassword } = validation.data;
     const username = await UserService.resetPassword(id, newPassword);
 
-    invalidateUserCache(id);
+    await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Reset Password", "User Management", `Reset password for user ${username}`);
       
     res.json({ success: true });

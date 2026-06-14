@@ -66,6 +66,8 @@ describe('SessionService', () => {
       id: 'user-1',
       username: 'testuser',
       role: 'Auditor',
+      // refresh now rejects non-Active users (Req 2.5); a valid refresh requires an Active account.
+      status: 'Active',
       session_version: 1,
     };
 
@@ -244,9 +246,10 @@ describe('SessionService', () => {
       const result = await SessionService.logout('valid-refresh-token');
 
       expect(result).toBe('testuser');
-      // Should update user_sessions status to LoggedOut
+      // logout terminates the session using a status permitted by the user_sessions.status
+      // CHECK constraint ('Terminated'), not the forbidden 'LoggedOut' value (Req 2.24).
       expect(mockPrepare).toHaveBeenCalledWith(
-        expect.stringContaining("SET status = 'LoggedOut'")
+        expect.stringContaining("SET status = 'Terminated'")
       );
       // Lookup/update use the token HASH, never the plaintext (Req 17.1, 17.2)
       expect(mockRun).toHaveBeenCalledWith(hashRefreshToken('valid-refresh-token'));

@@ -108,7 +108,9 @@ describe('UserService', () => {
         null,
         null,
         'role-1',
-        'IT-1001',
+        // employee_id now carries a random uniqueness disambiguator (Req 2.18):
+        // `${deptCode}-${nextNum}-${6 hex chars}`.
+        expect.stringMatching(/^IT-1001-[0-9A-F]{6}$/),
         false
       );
     });
@@ -133,7 +135,7 @@ describe('UserService', () => {
         job_title_id: 'jt-1',
         role: 'Auditor',
         status: 'Active',
-        employee_id: 'ENG-1001',
+        employee_id: expect.stringMatching(/^ENG-1001-[0-9A-F]{6}$/),
       });
       // Ensure password is NOT in the returned object
       expect(result).not.toHaveProperty('password');
@@ -254,6 +256,9 @@ describe('UserService', () => {
     });
 
     it('works for Suspended, Active, Archived statuses', async () => {
+      // 'Archived' (and 'Disabled') are not permitted by the users.status CHECK constraint, so
+      // setStatus persists them as the equivalent permitted 'Inactive' status (Req 2.1).
+      const STATUS_PERSIST_MAP: Record<string, string> = { Archived: 'Inactive', Disabled: 'Inactive' };
       const statuses = ['Suspended', 'Active', 'Archived'];
 
       for (const status of statuses) {
@@ -266,7 +271,7 @@ describe('UserService', () => {
         const result = await UserService.setStatus('user-1', status);
 
         expect(result).toBe('testuser');
-        expect(mockRun).toHaveBeenCalledWith(status, 'user-1');
+        expect(mockRun).toHaveBeenCalledWith(STATUS_PERSIST_MAP[status] ?? status, 'user-1');
       }
     });
   });

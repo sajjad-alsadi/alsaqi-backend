@@ -105,13 +105,11 @@ export class SecurityService {
       return true;
     } catch (error) {
       logger.error('File safety validation error:', error);
-      // Fail-closed: if security check fails, reject the file
-      // Only allow if Magika is simply not loaded (graceful degradation)
-      if (!this.isLoaded) {
-        logger.warn('Magika not available - allowing file with extension-only validation');
-        return true;
-      }
-      return false; 
+      // Fail-closed policy: when content identification is unavailable (Magika failed to load
+      // or the check threw), we cannot verify the file is safe. Rejecting is the documented
+      // safe default, consistent with the fail-closed intent — we never allow an unverified
+      // file through on extension alone.
+      return false;
     }
   }
 }

@@ -116,23 +116,36 @@ export class SettingsService {
   }
 
   static async updateUserManagementSettings(data: any) {
-    const { 
-      failed_login_threshold, 
-      inactive_account_threshold_days, 
-      password_min_length, 
-      session_timeout_minutes,
-      password_require_uppercase,
-      password_require_lowercase,
-      password_require_numbers,
-      password_require_symbols,
-      password_expiry_days,
-      enforce_single_session,
-      two_factor_auth
-    } = data;
-    
+    // Partial-update semantics (Req 2.23): merge supplied fields with the currently
+    // persisted values. `getUserManagementSettings` returns the persisted row, or a
+    // full set of sensible defaults when no row exists yet, so every column has a
+    // non-null fallback. We coalesce `provided ?? current` for every field, which
+    // guarantees the NOT NULL columns are never written as NULL/undefined while a
+    // provided value (including falsy values like 0) is always honored verbatim.
+    const current: any = (await this.getUserManagementSettings()) ?? {};
+
+    // NOT NULL columns: provided value, else currently persisted value, else default.
+    const failed_login_threshold = data.failed_login_threshold ?? current.failed_login_threshold ?? 3;
+    const inactive_account_threshold_days =
+      data.inactive_account_threshold_days ?? current.inactive_account_threshold_days ?? 90;
+    const password_min_length = data.password_min_length ?? current.password_min_length ?? 8;
+    const session_timeout_minutes = data.session_timeout_minutes ?? current.session_timeout_minutes ?? 30;
+
+    // Remaining editable columns (Req 2.16): coalesce provided value with persisted/default.
+    const password_require_uppercase = data.password_require_uppercase ?? current.password_require_uppercase ?? 1;
+    const password_require_lowercase = data.password_require_lowercase ?? current.password_require_lowercase ?? 1;
+    const password_require_numbers = data.password_require_numbers ?? current.password_require_numbers ?? 1;
+    const password_require_symbols = data.password_require_symbols ?? current.password_require_symbols ?? 1;
+    const password_expiry_days = data.password_expiry_days ?? current.password_expiry_days ?? 90;
+    const enforce_single_session = data.enforce_single_session ?? current.enforce_single_session ?? 0;
+    const two_factor_auth = data.two_factor_auth ?? current.two_factor_auth ?? 0;
+    // Newly-persisted editable settings (Req 2.16).
+    const bulk_import_enabled = data.bulk_import_enabled ?? current.bulk_import_enabled ?? 1;
+    const admin_approval_required = data.admin_approval_required ?? current.admin_approval_required ?? 0;
+
     // First check if it exists
     const exists = await db.prepare("SELECT 1 FROM user_management_settings WHERE id = 1").get();
-    
+
     if (exists) {
       await db.prepare(`
         UPDATE user_management_settings 
@@ -146,40 +159,46 @@ export class SettingsService {
             password_require_symbols = ?,
             password_expiry_days = ?,
             enforce_single_session = ?,
-            two_factor_auth = ?
+            two_factor_auth = ?,
+            bulk_import_enabled = ?,
+            admin_approval_required = ?
         WHERE id = 1
       `).run(
         failed_login_threshold, 
         inactive_account_threshold_days, 
         password_min_length, 
         session_timeout_minutes,
-        password_require_uppercase ?? 1,
-        password_require_lowercase ?? 1,
-        password_require_numbers ?? 1,
-        password_require_symbols ?? 1,
-        password_expiry_days ?? 90,
-        enforce_single_session ?? 0,
-        two_factor_auth ?? 0
+        password_require_uppercase,
+        password_require_lowercase,
+        password_require_numbers,
+        password_require_symbols,
+        password_expiry_days,
+        enforce_single_session,
+        two_factor_auth,
+        bulk_import_enabled,
+        admin_approval_required
       );
     } else {
       await db.prepare(`
         INSERT INTO user_management_settings (
           id, failed_login_threshold, inactive_account_threshold_days, password_min_length, session_timeout_minutes,
           password_require_uppercase, password_require_lowercase, password_require_numbers, password_require_symbols,
-          password_expiry_days, enforce_single_session, two_factor_auth
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          password_expiry_days, enforce_single_session, two_factor_auth, bulk_import_enabled, admin_approval_required
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         failed_login_threshold, 
         inactive_account_threshold_days, 
         password_min_length, 
         session_timeout_minutes,
-        password_require_uppercase ?? 1,
-        password_require_lowercase ?? 1,
-        password_require_numbers ?? 1,
-        password_require_symbols ?? 1,
-        password_expiry_days ?? 90,
-        enforce_single_session ?? 0,
-        two_factor_auth ?? 0
+        password_require_uppercase,
+        password_require_lowercase,
+        password_require_numbers,
+        password_require_symbols,
+        password_expiry_days,
+        enforce_single_session,
+        two_factor_auth,
+        bulk_import_enabled,
+        admin_approval_required
       );
     }
     return true;

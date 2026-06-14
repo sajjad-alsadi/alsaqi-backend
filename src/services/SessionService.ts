@@ -5,8 +5,11 @@ import { hashRefreshToken, hashPresentedRefreshToken } from './refreshTokenHash'
 
 export class SessionService {
   static async getActiveSessions() {
+    // Project only non-sensitive display columns and exclude sensitive token columns
+    // (refresh_token, session_token) so the session listing never leaks credentials (Req 2.25).
     return await db.prepare(`
-      SELECT s.*, u.name as user_name, u.username
+      SELECT s.id, s.user_id, s.login_time, s.last_activity, s.status, s.ip_address, s.device, s.browser,
+             u.name as user_name, u.username
       FROM user_sessions s
       JOIN users u ON s.user_id = u.id
       WHERE s.status = 'Active'
@@ -15,7 +18,14 @@ export class SessionService {
   }
 
   static async terminateSession(id: string | number) {
+    // Look up the owning user so we can revoke their outstanding access tokens (Req 2.4).
+    const session = await db.prepare("SELECT user_id FROM user_sessions WHERE id = ?").get(id) as any;
     await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE id = ?").run(id);
+    // Incrementing session_version invalidates every previously issued access token for the
+    // user, so the terminated session's token can no longer authenticate (Req 2.4).
+    if (session?.user_id) {
+      await db.prepare("UPDATE users SET session_version = session_version + 1 WHERE id = ?").run(session.user_id);
+    }
     return true;
   }
 
@@ -35,10 +45,27 @@ export class SessionService {
     const user = await db.prepare("SELECT * FROM users WHERE id = ?").get(session.user_id) as any;
     if (!user) throw new AuthError("User not found");
 
+    // Reject refreshes for users who are no longer Active (e.g. suspended/archived): a revoked
+    // account must not be able to mint new access tokens (Req 2.5).
+    if (user.status !== 'Active') {
+      throw new AuthError("Session revoked");
+    }
+
     let decodedToken: any = {};
     try {
       decodedToken = jwt.decode(refreshToken) || {};
     } catch (e) {}
+
+    // Reject when the presented token carries a session_version that no longer matches the
+    // user's current session_version (e.g. after an admin reset/password change bumped it).
+    // Forced-logout / password-reset revocation must not be bypassable via an old refresh token
+    // (Req 2.5).
+    if (
+      decodedToken.session_version !== undefined &&
+      decodedToken.session_version !== user.session_version
+    ) {
+      throw new AuthError("Session revoked");
+    }
 
     const rememberMe = !!decodedToken.rememberMe;
 
@@ -92,7 +119,10 @@ export class SessionService {
 
     if (session) {
       const user = await db.prepare("SELECT username FROM users WHERE id = ?").get(session.user_id) as any;
-      await db.prepare("UPDATE user_sessions SET status = 'LoggedOut' WHERE refresh_token = ?").run(presentedHash);
+      // Use a status permitted by the user_sessions.status CHECK constraint
+      // ('Active','Terminated','Expired') so logout reliably terminates the session row
+      // instead of failing on the forbidden 'LoggedOut' value (Req 2.24).
+      await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE refresh_token = ?").run(presentedHash);
       return user?.username;
     }
     return null;
@@ -100,6 +130,8 @@ export class SessionService {
 
   static async logoutAll(userId: string | number) {
     await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE user_id = ? AND status = 'Active'").run(userId);
+    // Revoke all outstanding access tokens for the user by bumping session_version (Req 2.4).
+    await db.prepare("UPDATE users SET session_version = session_version + 1 WHERE id = ?").run(userId);
     return true;
   }
 }

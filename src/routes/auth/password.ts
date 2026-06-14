@@ -5,6 +5,7 @@ import { PasswordService } from '../../services/PasswordService';
 import { AuthService } from '../../services/AuthService';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { ValidationError } from '../../utils/errors';
+import { DEFAULT_PASSWORD_MIN_LENGTH } from '../../services/passwordPolicy';
 
 const forgotPasswordSchema = z.object({
   username: z.string().min(1)
@@ -15,12 +16,12 @@ const approveResetSchema = z.object({
 });
 
 const changePasswordSchema = z.object({
-  newPassword: z.string().min(8).max(100)
+  newPassword: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100)
 });
 
 const updatePasswordSchema = z.object({
   currentPassword: z.string().min(1),
-  newPassword: z.string().min(8).max(100)
+  newPassword: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100)
 });
 
 export const createPasswordRoutes = (

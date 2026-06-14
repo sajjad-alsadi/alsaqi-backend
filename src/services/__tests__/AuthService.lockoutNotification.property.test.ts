@@ -144,7 +144,8 @@ function resetState() {
     username: 'bob',
     email: 'bob@example.com',
     password: '$2b$12$realhashvalueplaceholderxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    status: 'active',
+    // Canonical schema status; login blocks every non-'Active' status (Req 2.2).
+    status: 'Active',
     locked_until: null,
     failed_attempts: config.threshold, // threshold + 1 >= threshold => lockout
     role: 'auditor',

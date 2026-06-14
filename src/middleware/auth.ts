@@ -10,6 +10,7 @@ import { AuthenticatedRequest } from '../types';
 import { canonicalizePath, isPathAllowed } from './pathGate.js';
 import { redisManager } from '../cache/redisManager.js';
 import { AuthCacheInvalidator } from '../services/AuthCacheInvalidator';
+import { isLoginBlockedStatus } from '../services/accountStatus';
 import logger from '../utils/logger.js';
 import { getAuthRateLimitMax, getAuthRateLimitWindowS } from '../config/environmentConfig.js';
 
@@ -220,8 +221,10 @@ export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PU
         return res.status(401).json({ error: "User not found in database" });
       }
 
-      if (user.status === 'Suspended' || user.status === 'Disabled' || user.status === 'Archived') {
-        return res.status(403).json({ error: "Account suspended, disabled or archived" });
+      // Reject every non-active account, applying the same shared set of blocked statuses
+      // used by AuthService.login so enforcement is consistent across both paths (Req 2.2).
+      if (isLoginBlockedStatus(user.status)) {
+        return res.status(403).json({ error: "Account is not active" });
       }
 
       if (user.session_version !== decodedToken.session_version) {

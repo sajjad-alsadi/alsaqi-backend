@@ -4,6 +4,7 @@ import { db } from '../db/index';
 import { NotFoundError, ValidationError, AuthError } from '../utils/errors';
 import { invalidateUserCache } from '../middleware/auth';
 import { UserRole } from '@alsaqi/shared';
+import { validatePasswordPolicy } from './passwordPolicy';
 
 export class PasswordService {
   static async requestReset(username: string) {
@@ -21,7 +22,7 @@ export class PasswordService {
     await db.prepare(`INSERT INTO password_reset_requests (user_id, username, name, department) VALUES (?::uuid, ?::text, ?::text, ?::text)`)
       .run(user.id, user.username, user.name, user.department);
     
-    const admins = await db.prepare(`SELECT id FROM users WHERE role = '${UserRole.ADMIN}'`).all() as {id: number}[];
+    const admins = await db.prepare(`SELECT id FROM users WHERE role = ?`).all(UserRole.ADMIN) as {id: number}[];
     const alertMsg = `Password Reset Request\nUsername: ${user.username}\nName: ${user.name}\nDepartment: ${user.department || 'N/A'}`;
     
     return {
@@ -36,7 +37,10 @@ export class PasswordService {
     const user = await db.prepare("SELECT id, requires_password_change FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)").get(username, username) as any;
     if (!user) return 'None';
 
-    if (user.requires_password_change === 0) return 'None';
+    // Use a robust truthiness check: `requires_password_change` may be stored as a boolean
+    // (false) or a number (0). A strict `=== 0` comparison misses the boolean case, so treat
+    // any falsy value as "no password change required".
+    if (!user.requires_password_change) return 'None';
 
     const request = await db.prepare("SELECT status FROM password_reset_requests WHERE user_id = ? ORDER BY request_date DESC LIMIT 1").get(user.id) as any;
     if (!request) return 'None';
@@ -57,6 +61,15 @@ export class PasswordService {
     await db.prepare("UPDATE users SET password = ?::text, requires_password_change = 1, failed_attempts = 0, locked_until = NULL, session_version = session_version + 1 WHERE id = ?::uuid")
       .run(hashedTemp, request.user_id);
 
+    // Revoke outstanding refresh credentials and active sessions so prior refresh tokens can no
+    // longer be exchanged for new access tokens after an admin reset (Req 2.6).
+    try {
+      await db.prepare("UPDATE refresh_tokens SET is_revoked = 1, revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(request.user_id);
+    } catch (e) {
+      // Ignore if table/columns are unavailable in this environment
+    }
+    await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE user_id = ? AND status = 'Active'").run(request.user_id);
+
     await db.prepare("UPDATE password_reset_requests SET status = 'Approved', resolved_date = CURRENT_TIMESTAMP, resolved_by = ?::uuid WHERE id = ?::uuid")
       .run(adminId, requestId);
 
@@ -72,8 +85,8 @@ export class PasswordService {
 
     if (!user) throw new NotFoundError("User not found");
 
-    // Validate password against policy settings
-    await this.validatePasswordPolicy(newPassword);
+    // Validate password against policy settings (shared, centralized policy)
+    await validatePasswordPolicy(newPassword);
 
     if (bcrypt.compareSync(newPassword, user.password)) {
       throw new ValidationError("New password cannot be the same as the current password");
@@ -95,7 +108,7 @@ export class PasswordService {
     });
     
     // Invalidate cached user data so middleware picks up new session_version
-    invalidateUserCache(user.id);
+    await invalidateUserCache(user.id);
     
     const updatedUser = await db.prepare("SELECT id, username, role, session_version FROM users WHERE id = ?").get(user.id) as any;
     return updatedUser;
@@ -114,8 +127,8 @@ export class PasswordService {
       throw new ValidationError("New password cannot be the same as the current password");
     }
 
-    // Validate password against policy settings
-    await this.validatePasswordPolicy(newPassword);
+    // Validate password against policy settings (shared, centralized policy)
+    await validatePasswordPolicy(newPassword);
 
     const history = await db.prepare("SELECT password_hash FROM password_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 5").all(user.id) as { password_hash: string }[];
     
@@ -133,7 +146,7 @@ export class PasswordService {
     });
     
     // Invalidate cached user data so middleware picks up new session_version
-    invalidateUserCache(user.id);
+    await invalidateUserCache(user.id);
     
     const updatedUser = await db.prepare("SELECT id, username, role, session_version FROM users WHERE id = ?").get(user.id) as any;
     return updatedUser;

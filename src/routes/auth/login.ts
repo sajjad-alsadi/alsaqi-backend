@@ -39,6 +39,19 @@ export const createLoginRoutes = (
       return res.json({ requires2FA: true, tempToken });
     }
 
+    // Forced 2FA enrollment (Req 2.13): when the account must set up 2FA (its own
+    // requires_2fa_setup flag or the global two_factor_auth policy) but has not yet enrolled,
+    // do NOT grant full access. Return a short-lived setup token so the client can complete
+    // enrollment before any access/refresh tokens are issued.
+    if (result.user.requires_2fa_setup) {
+      const tempToken = jwt.sign(
+        { id: result.user.id, username: result.user.username, type: '2fa_setup_pending' },
+        JWT_PRIVATE_KEY,
+        { algorithm: 'RS256', expiresIn: '10m' }
+      );
+      return res.json({ requires2FASetup: true, tempToken });
+    }
+
     // Normal login flow (no 2FA) — issue full tokens
     // In production: sameSite: 'none' + secure: true (supports cross-origin/iframe)
     // In development: sameSite: 'lax' + secure: false (works on HTTP localhost)

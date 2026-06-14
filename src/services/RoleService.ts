@@ -1,5 +1,6 @@
 import { db } from '../db/index';
 import { NotFoundError } from '../utils/errors';
+import { AuthCacheInvalidator } from './AuthCacheInvalidator';
 
 export class RoleService {
   static async getAllRoles() {
@@ -47,6 +48,19 @@ export class RoleService {
         await db.prepare("INSERT INTO role_permissions (role_id, permission_id) VALUES (?::uuid, ?::uuid) ON CONFLICT DO NOTHING").run(roleId, pid);
       }
     });
+
+    // A role's permission set changed, so every user assigned to this role may now
+    // have stale cached authorization. Resolve the affected users and route each
+    // through the canonical AuthCacheInvalidator so both the in-process permission
+    // cache and the distributed Redis auth cache are cleared with retry semantics
+    // (Req 2.8).
+    const affectedUsers = await db
+      .prepare("SELECT id FROM users WHERE role_id = ?")
+      .all(roleId) as Array<{ id: string }>;
+    for (const user of affectedUsers) {
+      await AuthCacheInvalidator.invalidate(user.id);
+    }
+
     return true;
   }
 

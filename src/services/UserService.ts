@@ -1,8 +1,24 @@
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { db } from '../db/index';
 import { NotFoundError, ConflictError } from '../utils/errors';
 import { N8nService } from '../utils/n8nService';
 import { UserRole } from '@alsaqi/shared';
+import { validatePasswordPolicy } from './passwordPolicy';
+
+/**
+ * Maps requested status values that are NOT permitted by the
+ * `users.status CHECK (status IN ('Active','Inactive','Suspended'))` constraint
+ * onto an equivalent permitted value (Requirement 2.1). Archiving (and the
+ * legacy `'Disabled'`) persists as `'Inactive'` — a non-active status that, per
+ * the shared blocked-status rule, is blocked from authenticating. This resolves
+ * the `'Archived'` write that previously failed with a constraint violation
+ * (defect 1.1).
+ */
+const STATUS_PERSIST_MAP: Record<string, string> = {
+  Archived: 'Inactive',
+  Disabled: 'Inactive',
+};
 
 export class UserService {
   static async getUsers(query: any) {
@@ -57,7 +73,7 @@ export class UserService {
     const active = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Active'").get() as any;
     const suspended = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Suspended'").get() as any;
     const archived = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Archived'").get() as any;
-    const admins = await db.prepare(`SELECT COUNT(*) as count FROM users WHERE role = '${UserRole.ADMIN}'`).get() as any;
+    const admins = await db.prepare(`SELECT COUNT(*) as count FROM users WHERE role = ?`).get(UserRole.ADMIN) as any;
     
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -96,7 +112,12 @@ export class UserService {
       FROM permissions p
       JOIN user_permissions up ON p.id = up.permission_id
       WHERE up.user_id = ? AND up.is_allowed = 1
-    `).all(user.role_id, user.id);
+      EXCEPT
+      SELECT p.module, p.action
+      FROM permissions p
+      JOIN user_permissions up ON p.id = up.permission_id
+      WHERE up.user_id = ? AND up.is_allowed = 0
+    `).all(user.role_id, user.id, user.id);
 
     return { ...user, permissions };
   }
@@ -130,16 +151,43 @@ export class UserService {
          const lastNum = parseInt(parts[1], 10);
          if (!isNaN(lastNum)) nextNum = lastNum + 1;
       }
-      const employee_id = `${deptCode}-${nextNum}`;
+
+      // Generate a unique employee_id that incorporates entropy so two concurrent creations
+      // reading the SAME stale latest cannot collide on the sequential number (Req 2.18). The
+      // `${deptCode}-` prefix and a leading sequential number are preserved; a short random
+      // disambiguator is appended after the number.
+      const makeEmployeeId = () =>
+        `${deptCode}-${nextNum}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
       // Require 2FA setup for sensitive roles (Admin, Manager/Audit Manager) per Req 5.9
       const ROLES_REQUIRING_2FA = ['Admin', 'Manager'];
       const requires2faSetup = ROLES_REQUIRING_2FA.includes(role);
 
-      const result = await db.prepare(`
-        INSERT INTO users (username, password, name, email, department, job_title_id, role, unit, reporting_manager_id, access_scope, phone_number, notes, role_id, status, created_at, requires_password_change, employee_id, requires_2fa_setup)
-        VALUES (?::text, ?::text, ?::text, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::text, ?::uuid, 'Active', CURRENT_TIMESTAMP, 1, ?::text, ?::boolean)
-      `).run(username, hashedPassword, name, email, department || null, job_title_id || null, role, unit || null, reporting_manager_id || null, access_scope || null, phone_number || null, notes || null, role_id, employee_id, requires2faSetup);
+      // Insert with retry-on-conflict: `employee_id` is declared UNIQUE, so on the rare chance
+      // the generated value collides, regenerate the disambiguator and retry a few times
+      // before surfacing the error (Req 2.18).
+      let employee_id = makeEmployeeId();
+      let result: any;
+      const MAX_EMP_ID_ATTEMPTS = 5;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          result = await db.prepare(`
+            INSERT INTO users (username, password, name, email, department, job_title_id, role, unit, reporting_manager_id, access_scope, phone_number, notes, role_id, status, created_at, requires_password_change, employee_id, requires_2fa_setup)
+            VALUES (?::text, ?::text, ?::text, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::text, ?::uuid, 'Active', CURRENT_TIMESTAMP, 1, ?::text, ?::boolean)
+          `).run(username, hashedPassword, name, email, department || null, job_title_id || null, role, unit || null, reporting_manager_id || null, access_scope || null, phone_number || null, notes || null, role_id, employee_id, requires2faSetup);
+          break;
+        } catch (insertErr: any) {
+          const message = String(insertErr?.message || insertErr || '');
+          const isEmployeeIdConflict =
+            /employee_id/i.test(message) &&
+            /(unique|duplicate|constraint)/i.test(message);
+          if (isEmployeeIdConflict && attempt < MAX_EMP_ID_ATTEMPTS) {
+            employee_id = makeEmployeeId();
+            continue;
+          }
+          throw insertErr;
+        }
+      }
       
       // --- AUTOMATION: Send event to n8n ---
       await N8nService.sendEvent('user.created', {
@@ -165,10 +213,13 @@ export class UserService {
       const role_id = (await db.prepare("SELECT id FROM roles WHERE name = ?").get(role) as any)?.id;
 
       if (password) {
+        // Enforce the shared, configurable password policy on admin-set passwords so
+        // they cannot be weaker than self-service ones (Requirement 2.11).
+        await validatePasswordPolicy(password);
         const hashedPassword = bcrypt.hashSync(password, 12);
         await db.prepare(`
           UPDATE users 
-          SET name = ?::text, email = ?::text, department = ?::text, job_title_id = ?::uuid, role = ?::text, unit = ?::text, reporting_manager_id = ?::uuid, access_scope = ?::text, phone_number = ?::text, notes = ?::text, role_id = ?::uuid, status = ?::text, password = ?::text, requires_password_change = 1
+          SET name = ?::text, email = ?::text, department = ?::text, job_title_id = ?::uuid, role = ?::text, unit = ?::text, reporting_manager_id = ?::uuid, access_scope = ?::text, phone_number = ?::text, notes = ?::text, role_id = ?::uuid, status = ?::text, password = ?::text, requires_password_change = 1, session_version = session_version + 1
           WHERE id = ?::uuid
         `).run(name, email, department || null, job_title_id || null, role, unit || null, reporting_manager_id || null, access_scope || null, phone_number || null, notes || null, role_id, status || oldUser.status, hashedPassword, id);
       } else {
@@ -193,13 +244,17 @@ export class UserService {
     return await db.transaction(async () => {
       const user = await db.prepare("SELECT username FROM users WHERE id = ?").get(id) as any;
       if (!user) throw new NotFoundError("User not found");
-      await db.prepare(`UPDATE users SET status = ?::text WHERE id = ?::uuid`).run(status, id);
-      
+      // Persist a status permitted by the users.status CHECK constraint. A request to
+      // archive (or disable) is stored as 'Inactive', which is blocked from authenticating
+      // (Requirement 2.1).
+      const persistedStatus = STATUS_PERSIST_MAP[status] ?? status;
+      await db.prepare(`UPDATE users SET status = ?::text WHERE id = ?::uuid`).run(persistedStatus, id);
+
       // --- AUTOMATION: Send event to n8n ---
       await N8nService.sendEvent('user.status_changed', {
         userId: id,
         username: user.username,
-        newStatus: status
+        newStatus: persistedStatus
       });
 
       return user.username;
@@ -236,8 +291,18 @@ export class UserService {
   static async resetPassword(id: string, newPassword: string) {
     const user = await db.prepare("SELECT username FROM users WHERE id = ?").get(id) as any;
     if (!user) throw new NotFoundError("User not found");
+    // Enforce the shared, configurable password policy on admin resets (Requirement 2.11).
+    await validatePasswordPolicy(newPassword);
     const hashed = bcrypt.hashSync(newPassword, 12);
     await db.prepare(`UPDATE users SET password = ?::text, requires_password_change = 1, session_version = session_version + 1 WHERE id = ?::uuid`).run(hashed, id);
+    // Revoke outstanding refresh credentials and active sessions so prior refresh tokens can no
+    // longer be exchanged for new access tokens after an admin reset (Req 2.6).
+    try {
+      await db.prepare("UPDATE refresh_tokens SET is_revoked = 1, revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(id);
+    } catch (e) {
+      // Ignore if table/columns are unavailable in this environment
+    }
+    await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE user_id = ? AND status = 'Active'").run(id);
     return user.username;
   }
 
@@ -296,8 +361,11 @@ export class UserService {
     const permissions = await db.prepare("SELECT * FROM permissions ORDER BY module, action").all();
 
     // Sessions
+    // Project only non-sensitive display columns and exclude sensitive token columns
+    // (refresh_token, session_token) so init data never leaks credentials (Req 2.25).
     const sessions = await db.prepare(`
-      SELECT s.*, u.name as user_name, u.username
+      SELECT s.id, s.user_id, s.login_time, s.last_activity, s.status, s.ip_address, s.device, s.browser,
+             u.name as user_name, u.username
       FROM user_sessions s
       JOIN users u ON s.user_id = u.id
       WHERE s.status = 'Active'

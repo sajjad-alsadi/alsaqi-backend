@@ -1,5 +1,6 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { totpService } from '../../services/TOTPService';
 import { AuthService } from '../../services/AuthService';
@@ -77,6 +78,24 @@ async function issueFullTokens(userId: string, jwtPrivateKey: string, req: any, 
   await db.prepare(
     'INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES (?::text, ?::uuid, ?::timestamp)'
   ).run(refreshTokenHash, userId, refreshExpiry.toISOString());
+
+  // Record a session row mirroring the normal login path (Req 2.15) so the 2FA-completed login
+  // produces a listable/terminable session. Only the refresh-token hash is stored at rest.
+  const sessionToken = crypto.randomBytes(64).toString('hex');
+  try {
+    await db.prepare(`
+      INSERT INTO user_sessions (user_id, session_token, refresh_token, ip_address, browser, status)
+      VALUES (?::uuid, ?::text, ?::text, ?::text, ?::text, 'Active')
+    `).run(
+      userId,
+      sessionToken,
+      refreshTokenHash,
+      (req && req.ip) || 'Unknown',
+      (req && typeof req.get === 'function' && req.get('user-agent')) || 'Unknown'
+    );
+  } catch (e) {
+    logger.error(`[2FA] Failed to create user session for user ${userId}: ${e}`);
+  }
 
   // Set cookies (same pattern as login)
   const isProduction = process.env.NODE_ENV === 'production';

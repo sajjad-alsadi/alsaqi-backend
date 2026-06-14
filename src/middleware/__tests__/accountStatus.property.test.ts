@@ -168,7 +168,8 @@ describe('Property 5: Account Status Enforcement', () => {
 
           // All requests for users with forbidden status must get 403
           expect(res.status).toBe(403);
-          expect(res.body.error).toContain('suspended');
+          // The middleware blocks every non-active status with a single shared message (Req 2.2).
+          expect(res.body.error).toContain('not active');
         }
       ),
       { numRuns: 100 }

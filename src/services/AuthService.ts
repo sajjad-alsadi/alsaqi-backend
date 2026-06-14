@@ -6,6 +6,7 @@ import { UserRole } from '@alsaqi/shared';
 import { AuditChainService } from './AuditChainService';
 import { verifyPassword, DUMMY_HASH } from './passwordVerifier';
 import { hashRefreshToken } from './refreshTokenHash';
+import { isLoginBlockedStatus } from './accountStatus';
 
 export class AuthService {
   static async login(usernameOrEmail: string, password: string, jwtSecret: string, JWT_PRIVATE_KEY: string, ipAddress?: string, userAgent?: string, rememberMe?: boolean) {
@@ -49,8 +50,11 @@ export class AuthService {
         throw new InvalidCredentialsError();
       }
 
-      if (user.status === 'Suspended') {
-        console.warn(`[AuthService] Login failed: Account suspended for "${user.username}"`);
+      // Block every non-active account from authenticating, applying the same shared set of
+      // blocked statuses used by the auth middleware (Requirement 2.2). The single generic
+      // failure is surfaced so the response does not reveal the account state (Req 15.2, 15.3).
+      if (isLoginBlockedStatus(user.status)) {
+        console.warn(`[AuthService] Login failed: Account not active (status="${user.status}") for "${user.username}"`);
         throw new InvalidCredentialsError();
       }
 
@@ -71,6 +75,36 @@ export class AuthService {
       }
 
       await db.prepare("UPDATE users SET failed_attempts = 0, locked_until = NULL, last_login = CURRENT_TIMESTAMP WHERE id = ?::uuid").run(user.id);
+
+      // Read account-policy settings once for single-session enforcement and the global 2FA
+      // requirement (Req 2.13, 2.14). A failure to read settings must not block a valid login,
+      // so it is treated as "no policy configured".
+      let policySettings: any = null;
+      try {
+        policySettings = await db.prepare(
+          "SELECT enforce_single_session, two_factor_auth FROM user_management_settings WHERE id = 1"
+        ).get();
+      } catch (e) {
+        console.error("[AuthService] Failed to read account policy settings:", e);
+      }
+
+      // Single-session enforcement (Req 2.14): when enabled, terminate the user's other active
+      // sessions BEFORE inserting the new one so only the freshly-issued session remains Active.
+      if (policySettings && policySettings.enforce_single_session) {
+        try {
+          await db.prepare(
+            "UPDATE user_sessions SET status = 'Terminated' WHERE user_id = ?::uuid AND status = 'Active'"
+          ).run(user.id);
+        } catch (e) {
+          console.error("[AuthService] Failed to terminate existing sessions for single-session enforcement:", e);
+        }
+      }
+
+      // Forced 2FA enrollment (Req 2.13): the account requires 2FA setup when its own
+      // requires_2fa_setup flag is set OR the global two_factor_auth policy is enabled. The login
+      // route consults the user's actual TOTP enrollment first; this flag only forces enrollment
+      // when the user has not yet enrolled.
+      const requires2faSetup = !!user.requires_2fa_setup || !!(policySettings && policySettings.two_factor_auth);
 
       // Check password expiry
       let requiresPasswordChange = !!user.requires_password_change;
@@ -158,6 +192,7 @@ export class AuthService {
           role: user.role,
           name: user.name,
           requires_password_change: requiresPasswordChange,
+          requires_2fa_setup: requires2faSetup,
           permissions
         },
         token,
@@ -184,8 +219,12 @@ export class AuthService {
    * cannot discard the lockout (Req 8.5).
    */
   private static async handleFailedLogin(user: any, ipAddress?: string): Promise<void> {
-    // Count the failed attempt (standalone, auto-committed statement).
-    await db.prepare("UPDATE users SET failed_attempts = failed_attempts + 1 WHERE id = ?::uuid").run(user.id);
+    // Count the failed attempt (standalone, auto-committed statement). Read back the
+    // authoritative post-increment count so that, under concurrency, the lockout decision is
+    // based on the committed DB value rather than a stale in-memory snapshot (Req 2.17).
+    const incrementResult = await db
+      .prepare("UPDATE users SET failed_attempts = failed_attempts + 1 WHERE id = ?::uuid RETURNING failed_attempts")
+      .run(user.id) as any;
 
     // Read threshold from settings (default 5 if not configured).
     let lockThreshold = 5;
@@ -194,7 +233,14 @@ export class AuthService {
       if (settings?.failed_login_threshold) lockThreshold = settings.failed_login_threshold;
     } catch (e) { /* use default */ }
 
-    if (user.failed_attempts + 1 >= lockThreshold) {
+    // Prefer the authoritative post-increment count returned by the UPDATE; fall back to the
+    // pre-increment in-memory count + 1 when the driver/environment does not return it.
+    const authoritativeCount =
+      incrementResult?.failed_attempts ??
+      incrementResult?.rows?.[0]?.failed_attempts ??
+      (user.failed_attempts + 1);
+
+    if (authoritativeCount >= lockThreshold) {
       // Commit the lockout state first and independently, so it is preserved even if the
       // subsequent notification transaction fails and rolls back (Req 8.5).
       await db.prepare("UPDATE users SET locked_until = ?::timestamp WHERE id = ?::uuid")

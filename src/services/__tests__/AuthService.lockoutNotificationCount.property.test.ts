@@ -77,7 +77,8 @@ const BASE_USER = {
   username: 'victim',
   email: 'victim@example.com',
   password: '$2b$12$realhashvalueplaceholderxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-  status: 'active',
+  // Canonical schema status; login blocks every non-'Active' status (Req 2.2).
+  status: 'Active',
   locked_until: null,
   role: 'admin',
   name: 'Victim',

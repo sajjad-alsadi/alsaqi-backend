@@ -202,7 +202,8 @@ describe('Middleware Integration Tests', () => {
         .set('Cookie', 'token=valid-token');
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('suspended');
+      // The middleware now blocks every non-active status with a single shared message (Req 2.2).
+      expect(res.body.error).toContain('not active');
     });
 
     it('returns 401 when session_version does not match', async () => {
