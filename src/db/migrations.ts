@@ -26,7 +26,7 @@ export const runMigrations = async () => {
       email TEXT,
       department TEXT,
       role TEXT DEFAULT 'user',
-      status TEXT DEFAULT 'active',
+      status TEXT DEFAULT 'Active',
       last_login TIMESTAMP,
       failed_attempts INTEGER DEFAULT 0,
       locked_until TIMESTAMP,
@@ -1192,6 +1192,24 @@ export const runMigrations = async () => {
 
   // Seed default Users (Admin and Test)
   try {
+    // Normalize legacy lowercase status values to the canonical capitalized form
+    // required by the login path (AuthService.login / isLoginBlockedStatus) and the
+    // schema CHECK constraint (status IN ('Active','Inactive','Suspended')).
+    // Older rows (and previously-seeded admin/test users) stored 'active', which the
+    // login gate treats as a blocked status, causing valid credentials to be rejected.
+    try {
+      const normalized = await db.prepare(
+        "UPDATE users SET status = 'Active' WHERE status = 'active'"
+      ).run();
+      await db.prepare("UPDATE users SET status = 'Inactive' WHERE status = 'inactive'").run();
+      await db.prepare("UPDATE users SET status = 'Suspended' WHERE status = 'suspended'").run();
+      if (normalized?.changes) {
+        console.log(`[SEED] Normalized ${normalized.changes} user(s) from status 'active' -> 'Active'.`);
+      }
+    } catch (normErr) {
+      console.error("[SEED] Failed to normalize user status values:", normErr);
+    }
+
     const bcryptModule = await import("bcryptjs");
     const bcrypt = bcryptModule.default || bcryptModule;
     const password = "admin";
@@ -1207,7 +1225,7 @@ export const runMigrations = async () => {
 
       await db.prepare(`
         INSERT INTO users (username, password, name, role, role_id, department, status, created_at) 
-        VALUES ('admin', ?, 'System Administrator', 'Admin', ?, 'Management', 'active', CURRENT_TIMESTAMP)
+        VALUES ('admin', ?, 'System Administrator', 'Admin', ?, 'Management', 'Active', CURRENT_TIMESTAMP)
       `).run(hashedPassword, roleId);
       console.log("[SEED] Default admin user seeded.");
     } else {
@@ -1232,7 +1250,7 @@ export const runMigrations = async () => {
 
       await db.prepare(`
         INSERT INTO users (username, password, name, role, role_id, department, status, created_at) 
-        VALUES ('test', ?, 'Test Auditor', 'Internal Auditor', ?, 'Audit', 'active', CURRENT_TIMESTAMP)
+        VALUES ('test', ?, 'Test Auditor', 'Internal Auditor', ?, 'Audit', 'Active', CURRENT_TIMESTAMP)
       `).run(testHashedPassword, roleId);
       console.log("[SEED] Default test user seeded.");
     } else {

@@ -64,7 +64,7 @@ async function batchResolveActiveUsersByName(names: string[]): Promise<Map<strin
   await processBatches(uniqueNames, async (batch) => {
     const placeholders = batch.map((_, i) => `$${i + 1}`).join(', ');
     const users = await db.prepare(
-      `SELECT id, name, username FROM users WHERE (name IN (${placeholders}) OR username IN (${placeholders})) AND status = 'active'`
+      `SELECT id, name, username FROM users WHERE (name IN (${placeholders}) OR username IN (${placeholders})) AND status = 'Active'`
     ).all(...batch, ...batch) as Array<{ id: string; name: string; username: string }>;
     
     for (const user of users) {
@@ -399,7 +399,7 @@ let lastDeadlineCheckDate: string | null = null;
  */
 export async function getManagerAdminIds(): Promise<string[]> {
   const users = await db.prepare(
-    `SELECT id FROM users WHERE role IN ('${UserRole.ADMIN}', '${UserRole.MANAGER}') AND status = 'active'`
+    `SELECT id FROM users WHERE role IN ('${UserRole.ADMIN}', '${UserRole.MANAGER}') AND status = 'Active'`
   ).all() as any[];
   return users.map((u: any) => u.id);
 }
@@ -500,7 +500,7 @@ export async function getUnarchivedPlansForYear(year: number): Promise<Array<{ i
 export async function resolveLeadAuditorId(leadAuditor: string | null): Promise<string | null> {
   if (!leadAuditor) return null;
   const user = await db.prepare(
-    `SELECT id FROM users WHERE (name = ? OR username = ?) AND status = 'active'`
+    `SELECT id FROM users WHERE (name = ? OR username = ?) AND status = 'Active'`
   ).get(leadAuditor, leadAuditor) as any;
   return user?.id || null;
 }

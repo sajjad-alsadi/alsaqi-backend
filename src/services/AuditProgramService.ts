@@ -158,7 +158,7 @@ export class AuditProgramService {
 
       // 11. Send notification to Manager and Admin for approval
       const managerAndAdminIds = await this.db.prepare(
-        `SELECT id FROM users WHERE role IN (?, ?) AND status = 'active'`
+        `SELECT id FROM users WHERE role IN (?, ?) AND status = 'Active'`
       ).all(UserRole.MANAGER, UserRole.ADMIN) as any[];
 
       const recipientIds = managerAndAdminIds.map((u: any) => u.id);

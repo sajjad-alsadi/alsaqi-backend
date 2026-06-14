@@ -193,7 +193,7 @@ export class NotificationService {
     let targetUserIds: string[] = [];
 
     if (recipientIds === 'all') {
-      const users = await db.prepare("SELECT id FROM users WHERE status = 'active'").all() as any[];
+      const users = await db.prepare("SELECT id FROM users WHERE status = 'Active'").all() as any[];
       targetUserIds = users.map((u: any) => u.id);
     } else if (Array.isArray(recipientIds)) {
       targetUserIds = [...recipientIds];
@@ -306,7 +306,7 @@ export class NotificationService {
   /** Get admin user IDs */
   static async getAdminIds(): Promise<string[]> {
     const admins = await db.prepare(
-      `SELECT id FROM users WHERE role = '${UserRole.ADMIN}' AND status = 'active'`
+      `SELECT id FROM users WHERE role = '${UserRole.ADMIN}' AND status = 'Active'`
     ).all() as any[];
     return admins.map((a: any) => a.id);
   }
@@ -322,7 +322,7 @@ export class NotificationService {
   /** Get users in a specific department */
   static async getUserIdsByDepartment(department: string): Promise<string[]> {
     const users = await db.prepare(
-      "SELECT id FROM users WHERE department = ? AND status = 'active'"
+      "SELECT id FROM users WHERE department = ? AND status = 'Active'"
     ).all(department) as any[];
     return users.map((u: any) => u.id);
   }

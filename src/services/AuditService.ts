@@ -212,7 +212,7 @@ export class AuditService {
       try {
         const adminIds = await NotificationService.getAdminIds();
         const managerIds = await db.prepare(
-          `SELECT id FROM users WHERE role = ? AND status = 'active'`
+          `SELECT id FROM users WHERE role = ? AND status = 'Active'`
         ).all(UserRole.MANAGER) as any[];
         const managerUserIds = managerIds.map((m: any) => m.id);
 
@@ -407,7 +407,7 @@ export class AuditService {
     try {
       const adminIds = await NotificationService.getAdminIds();
       const managerIds = await db.prepare(
-        `SELECT id FROM users WHERE role = ? AND status = 'active'`
+        `SELECT id FROM users WHERE role = ? AND status = 'Active'`
       ).all(UserRole.MANAGER) as any[];
       const managerUserIds = managerIds.map((m: any) => m.id);
 

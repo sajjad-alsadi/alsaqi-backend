@@ -265,7 +265,7 @@ describe('NotificationService', () => {
 
       expect(result).toBe(true);
       expect(mockPrepare).toHaveBeenCalledWith(
-        expect.stringContaining("SELECT id FROM users WHERE status = 'active'")
+        expect.stringContaining("SELECT id FROM users WHERE status = 'Active'")
       );
     });
 
@@ -370,7 +370,7 @@ describe('NotificationService', () => {
         expect.stringContaining("role = 'Admin'")
       );
       expect(mockPrepare).toHaveBeenCalledWith(
-        expect.stringContaining("status = 'active'")
+        expect.stringContaining("status = 'Active'")
       );
     });
   });
