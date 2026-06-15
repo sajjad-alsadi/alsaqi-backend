@@ -18,7 +18,13 @@ describe('CRUD Generator Exclusion', () => {
     expect(CRUD_EXCLUDED_ROUTES).toContain('audit-findings');
   });
 
-  it('contains exactly 4 excluded routes', () => {
-    expect(CRUD_EXCLUDED_ROUTES).toHaveLength(4);
+  it('excludes compliance-items from CRUD generation', () => {
+    // compliance-items is served exclusively by the canonical custom route
+    // /api/v1/compliance, so the generic CRUD route must be excluded.
+    expect(CRUD_EXCLUDED_ROUTES).toContain('compliance-items');
+  });
+
+  it('contains exactly 5 excluded routes', () => {
+    expect(CRUD_EXCLUDED_ROUTES).toHaveLength(5);
   });
 });

@@ -20,6 +20,10 @@ export const CRUD_EXCLUDED_ROUTES: string[] = [
   'audit-programs',
   'recommendations',
   'audit-findings',
+  // compliance-items is served exclusively by the canonical custom route
+  // /api/v1/compliance (createComplianceRoutes); excluding it here prevents the
+  // generic generateRoutes call from registering a duplicate /api/compliance-items route.
+  'compliance-items',
 ];
 
 export const createCrudRoutes = (

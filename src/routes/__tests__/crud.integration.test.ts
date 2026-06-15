@@ -550,17 +550,15 @@ describe('CRUD Generator Integration Tests', () => {
       expect(mockBaseService.delete).toHaveBeenCalledWith('fraud_log', 'fraud-1');
     });
 
-    it('GET /api/compliance-items should work', async () => {
-      mockBaseService.findAll.mockResolvedValue({
-        data: [{ id: 1, ref_number: 'CMP-24-001', title: 'تعليمات' }],
-        pagination: { page: 1, pageSize: 50, total: 1, totalPages: 1, hasNext: false, hasPrev: false },
-      });
-
+    it('GET /api/compliance-items should return 404 (excluded from CRUD generator, served by canonical /api/v1/compliance route)', async () => {
       const req = createAuthenticatedRequest(app);
       const res = await req.get('/api/compliance-items');
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
+      // compliance-items is excluded from the CRUD generator (CRUD_EXCLUDED_ROUTES)
+      // because it is served exclusively by the canonical custom route
+      // /api/v1/compliance. The generic /api/compliance-items route is therefore
+      // never registered, so it is not mounted and returns 404.
+      expect(res.status).toBe(404);
     });
 
     it('PUT /api/central-bank-instructions/:id should update', async () => {

@@ -1,6 +1,6 @@
-import { db } from "./index";
+import { db } from "./index.js";
 import { ROLES, MODULES, PERMISSIONS, DEFAULT_PERMISSIONS } from "../permissions.js";
-import { Migration } from "./migrationRunner";
+import { Migration } from "./migrationRunner.js";
 
 export const runMigrations = async () => {
   // Test connection first to avoid multiple connection errors
@@ -249,11 +249,6 @@ export const runMigrations = async () => {
       risk_id UUID NOT NULL REFERENCES risk_register(id),
       PRIMARY KEY (finding_id, risk_id)
     )`,
-    `CREATE TABLE IF NOT EXISTS finding_compliance (
-      finding_id UUID NOT NULL REFERENCES audit_findings(id),
-      compliance_id UUID NOT NULL REFERENCES central_bank_instructions(id),
-      PRIMARY KEY (finding_id, compliance_id)
-    )`,
     `CREATE TABLE IF NOT EXISTS compliance_items (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       ref_number TEXT NOT NULL,
@@ -269,6 +264,11 @@ export const runMigrations = async () => {
       created_by UUID REFERENCES users(id),
       created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS finding_compliance (
+      finding_id UUID NOT NULL REFERENCES audit_findings(id) ON DELETE CASCADE,
+      compliance_id UUID NOT NULL REFERENCES compliance_items(id),
+      PRIMARY KEY (finding_id, compliance_id)
     )`,
     `CREATE TABLE IF NOT EXISTS law_bank (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -895,7 +895,7 @@ export const runMigrations = async () => {
   try {
     const currentYear = new Date().getFullYear();
     // Use a more robust query to find plans without a valid code
-    const existingPlans = await db.prepare("SELECT id, title FROM audit_plans WHERE plan_code IS NULL OR plan_code = '' OR plan_code NOT LIKE 'AP-%'").all();
+    const existingPlans = await db.prepare("SELECT id, title FROM audit_plans WHERE plan_code IS NULL OR plan_code = '' OR plan_code NOT LIKE 'AP-%'").all() as any[];
     
     if (existingPlans && existingPlans.length > 0) {
       for (let i = 0; i < existingPlans.length; i++) {
@@ -922,7 +922,7 @@ export const runMigrations = async () => {
 
   // Backfill employee_id for existing users
   try {
-    const existingUsers = await db.prepare("SELECT id, department FROM users WHERE employee_id IS NULL OR employee_id = ''").all();
+    const existingUsers = await db.prepare("SELECT id, department FROM users WHERE employee_id IS NULL OR employee_id = ''").all() as any[];
     if (existingUsers && existingUsers.length > 0) {
       for (let i = 0; i < existingUsers.length; i++) {
         const user = existingUsers[i];
@@ -1028,7 +1028,8 @@ export const runMigrations = async () => {
         issue_date            TEXT,
         effective_date        TEXT,
         review_date           TEXT,
-        compliance_status     TEXT NOT NULL DEFAULT 'under_review',
+        compliance_status     TEXT NOT NULL DEFAULT 'under_review'
+                                CHECK (compliance_status IN ('compliant', 'non_compliant', 'under_review')),
         maturity_score        INTEGER CHECK(maturity_score BETWEEN 0 AND 100),
         gap_notes             TEXT,
         responsible_person_id UUID REFERENCES users(id),
@@ -1040,7 +1041,8 @@ export const runMigrations = async () => {
         created_by            UUID REFERENCES users(id),
         created_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        deleted_at            TIMESTAMPTZ
+        deleted_at            TIMESTAMPTZ,
+        deleted_by            UUID REFERENCES users(id)
       )
     `).run();
 
@@ -1058,14 +1060,25 @@ export const runMigrations = async () => {
       `ALTER TABLE compliance_items ADD COLUMN IF NOT EXISTS keywords TEXT`,
       `ALTER TABLE compliance_items ADD COLUMN IF NOT EXISTS version TEXT`,
       `ALTER TABLE compliance_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
+      `ALTER TABLE compliance_items ADD COLUMN IF NOT EXISTS deleted_by UUID REFERENCES users(id)`,
     ];
     for (const ddl of addColumnIfNotExists) {
       try { await db.prepare(ddl).run(); } catch (_) { /* column already exists */ }
     }
 
+    // Ensure the unified compliance_status CHECK constraint exists even when the
+    // table was created from the older, unconstrained definition above. Guarded
+    // so idempotent re-runs (constraint already present) are safely ignored.
+    try {
+      await db.prepare(
+        `ALTER TABLE compliance_items ADD CONSTRAINT compliance_items_compliance_status_check ` +
+        `CHECK (compliance_status IN ('compliant', 'non_compliant', 'under_review'))`
+      ).run();
+    } catch (_) { /* constraint already exists */ }
+
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS finding_compliance (
-        finding_id     UUID NOT NULL REFERENCES audit_findings(id),
+        finding_id     UUID NOT NULL REFERENCES audit_findings(id) ON DELETE CASCADE,
         compliance_id  UUID NOT NULL REFERENCES compliance_items(id),
         PRIMARY KEY (finding_id, compliance_id)
       )
@@ -1219,7 +1232,7 @@ export const runMigrations = async () => {
     const adminExists = await db.prepare("SELECT * FROM users WHERE username = 'admin' LIMIT 1").get();
     if (!adminExists) {
       console.log("[SEED] Admin user not found. Seeding...");
-      const adminRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.ADMIN);
+      const adminRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.ADMIN) as any;
       const roleId = adminRole ? adminRole.id : null;
       console.log(`[SEED] Admin Role ID: ${roleId}`);
 
@@ -1231,7 +1244,7 @@ export const runMigrations = async () => {
     } else {
       console.log("[SEED] Admin user already exists. Checking role_id...");
       // Update role_id if missing or incorrect
-      const adminRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.ADMIN);
+      const adminRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.ADMIN) as any;
       if (adminRole && adminRole.id) {
         console.log(`[SEED] Found Admin Role ID: ${adminRole.id}. Updating admin user...`);
         const result = await db.prepare("UPDATE users SET role_id = ? WHERE username = 'admin' AND (role_id IS NULL OR role_id != ?)").run(adminRole.id, adminRole.id);
@@ -1244,7 +1257,7 @@ export const runMigrations = async () => {
     if (!testExists) {
       console.log("[SEED] Test user not found. Seeding...");
       const testHashedPassword = bcrypt.hashSync("test", 12);
-      const auditorRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.INTERNAL_AUDITOR);
+      const auditorRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.INTERNAL_AUDITOR) as any;
       const roleId = auditorRole ? auditorRole.id : null;
       console.log(`[SEED] Test User Role ID: ${roleId}`);
 
@@ -1529,7 +1542,7 @@ export const versionedMigrations: Migration[] = [
       // Check if already partitioned
       const checkResult = await db.prepare(`
         SELECT relkind FROM pg_class WHERE relname = 'audit_trail'
-      `).get();
+      `).get() as any;
 
       if (checkResult?.relkind === 'p') {
         // Already partitioned, skip
@@ -1566,13 +1579,13 @@ export const versionedMigrations: Migration[] = [
       // Step 3: Check for existing data and create historical partitions if needed
       const existingData = await db.prepare(
         `SELECT COUNT(*) as count FROM audit_trail`
-      ).get();
+      ).get() as any;
 
       if (existingData && parseInt(existingData.count) > 0) {
         // Find the oldest record to create partitions for historical data
         const oldestRow = await db.prepare(
           `SELECT MIN(timestamp) as min_ts FROM audit_trail`
-        ).get();
+        ).get() as any;
 
         if (oldestRow?.min_ts) {
           const oldestDate = new Date(oldestRow.min_ts);

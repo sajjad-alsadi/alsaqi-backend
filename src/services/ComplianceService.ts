@@ -1,4 +1,5 @@
 import { db } from '../db/index';
+import { NotFoundError } from '../utils/errors';
 
 export class ComplianceService {
 
@@ -6,6 +7,8 @@ export class ComplianceService {
     source_type?: string;
     compliance_status?: string;
     search?: string;
+    page?: number;
+    pageSize?: number;
   }) {
     let sql = `
       SELECT
@@ -29,16 +32,30 @@ export class ComplianceService {
       params.push(filters.compliance_status);
     }
     if (filters?.search) {
-      sql += ` AND (ci.title LIKE ? OR ci.ref_number LIKE ? OR ci.description LIKE ?)`;
-      const term = `%${filters.search}%`;
+      // Escape LIKE wildcards so a search term containing % or _ is matched
+      // literally. Backslash must be escaped first, then % and _. The matching
+      // LIKE clauses declare ESCAPE '\' (written as '\\' in this JS literal).
+      const escaped = filters.search
+        .replace(/\\/g, '\\\\')
+        .replace(/%/g, '\\%')
+        .replace(/_/g, '\\_');
+      sql += ` AND (ci.title LIKE ? ESCAPE '\\' OR ci.ref_number LIKE ? ESCAPE '\\' OR ci.description LIKE ? ESCAPE '\\')`;
+      const term = `%${escaped}%`;
       params.push(term, term, term);
     }
 
     sql += ` ORDER BY ci.created_at DESC`;
-    // Wait, PGlite requires `db.prepare(sql).all(...params)` ? 
-    // Yes, but let's check PGlite docs. PGlite `db.query(sql, params)`. 
-    // Wait, the project uses `db.prepare().all()` - maybe it's not PGlite, or it's a wrapper.
-    // The previous instructions show: return await db.prepare(sql).all(...params);
+
+    // Apply pagination only when the caller explicitly provides page/pageSize.
+    // When neither is supplied, return the full unpaginated result set
+    // (preserves the prior behavior relied on by direct service callers).
+    if (filters?.page != null || filters?.pageSize != null) {
+      const pageSize = Number(filters?.pageSize) > 0 ? Number(filters?.pageSize) : 20;
+      const page = Number(filters?.page) > 0 ? Number(filters?.page) : 1;
+      sql += ` LIMIT ? OFFSET ?`;
+      params.push(pageSize, (page - 1) * pageSize);
+    }
+
     return await db.prepare(sql).all(...params);
   }
 
@@ -52,7 +69,7 @@ export class ComplianceService {
       LEFT JOIN org_entities o ON ci.department_id = o.id
       WHERE ci.id = ? AND ci.deleted_at IS NULL
     `).get(id);
-    if (!item) throw new Error('NOT_FOUND');
+    if (!item) throw new NotFoundError('Compliance item not found');
     return item;
   }
 
@@ -79,39 +96,48 @@ export class ComplianceService {
   }
 
   static async update(id: string, data: any) {
+    // Build the SET clause dynamically from the fields actually provided.
+    // Only columns present in `data` are updated; a provided value of `null`
+    // intentionally nulls the (optional) column instead of being ignored as
+    // the previous COALESCE(?, col) form did.
+    const updatableFields = [
+      'title', 'source_type', 'issuing_authority', 'category',
+      'issue_date', 'effective_date', 'review_date', 'compliance_status',
+      'maturity_score', 'gap_notes', 'responsible_person_id', 'department_id',
+      'description', 'keywords', 'version', 'attachment_path',
+    ];
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+    for (const field of updatableFields) {
+      if (field in data) {
+        setClauses.push(`${field} = ?`);
+        params.push(data[field]);
+      }
+    }
+
+    // Nothing to update beyond the timestamp; still touch updated_at so the
+    // call remains a well-formed (and observable) update.
+    setClauses.push(`updated_at = CURRENT_TIMESTAMP`);
+
+    params.push(id);
     await db.prepare(`
       UPDATE compliance_items SET
-        title = COALESCE(?, title),
-        source_type = COALESCE(?, source_type),
-        issuing_authority = COALESCE(?, issuing_authority),
-        category = COALESCE(?, category),
-        issue_date = COALESCE(?, issue_date),
-        effective_date = COALESCE(?, effective_date),
-        review_date = COALESCE(?, review_date),
-        compliance_status = COALESCE(?, compliance_status),
-        maturity_score = COALESCE(?, maturity_score),
-        gap_notes = COALESCE(?, gap_notes),
-        responsible_person_id = COALESCE(?, responsible_person_id),
-        department_id = COALESCE(?, department_id),
-        description = COALESCE(?, description),
-        keywords = COALESCE(?, keywords),
-        version = COALESCE(?, version),
-        attachment_path = COALESCE(?, attachment_path),
-        updated_at = CURRENT_TIMESTAMP
+        ${setClauses.join(',\n        ')}
       WHERE id = ? AND deleted_at IS NULL
-    `).run(
-      data.title, data.source_type, data.issuing_authority,
-      data.category, data.issue_date, data.effective_date,
-      data.review_date, data.compliance_status, data.maturity_score,
-      data.gap_notes, data.responsible_person_id, data.department_id,
-      data.description, data.keywords, data.version, data.attachment_path, id
-    );
+    `).run(...params);
   }
 
-  static async softDelete(id: string) {
-    await db.prepare(
-      `UPDATE compliance_items SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).run(id);
+  static async softDelete(id: string, deletedBy: string) {
+    const result = await db.prepare(
+      `UPDATE compliance_items
+         SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ?
+       WHERE id = ? AND deleted_at IS NULL`
+    ).run(deletedBy ?? null, id);
+    // No row affected → the item does not exist or was already deleted.
+    if (result.changes === 0) {
+      throw new NotFoundError('Compliance item not found or already deleted');
+    }
   }
 
   static async getSummary() {

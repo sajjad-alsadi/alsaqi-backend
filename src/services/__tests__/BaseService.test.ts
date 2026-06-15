@@ -303,7 +303,7 @@ describe('BaseService', () => {
 
     it('should generate auto-code when code column is empty', async () => {
       mockGenerateCode.mockResolvedValueOnce('IT-PL-24-001');
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 5, changes: 1 });
+      mockGet.mockResolvedValueOnce({ id: 5 }); // INSERT ... RETURNING id
 
       const data = { title: 'New Plan', department: 'IT' };
 
@@ -314,7 +314,9 @@ describe('BaseService', () => {
     });
 
     it('should insert record and return result with id', async () => {
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 42, changes: 1 });
+      // create now obtains the real primary key via `INSERT ... RETURNING id`
+      // executed through `get()`, so the inserted row is read back as { id }.
+      mockGet.mockResolvedValueOnce({ id: 42 }); // RETURNING id
       mockGenerateCode.mockResolvedValueOnce(null);
 
       const data = { title: 'Test Task', plan_code: 'EXISTING-CODE' };
@@ -325,6 +327,9 @@ describe('BaseService', () => {
       expect(result.title).toBe('Test Task');
       expect(mockPrepare).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO')
+      );
+      expect(mockPrepare).toHaveBeenCalledWith(
+        expect.stringContaining('RETURNING id')
       );
     });
 

@@ -152,8 +152,9 @@ describe('AuditPlanService', () => {
       mockDb.prepare.mockReturnValueOnce({
         all: vi.fn().mockResolvedValue([]),
       });
-      // BaseService.create internal: INSERT
+      // BaseService.create internal: INSERT ... RETURNING id (read back via get())
       mockDb.prepare.mockReturnValueOnce({
+        get: vi.fn().mockResolvedValue({ id: 'new-plan-id' }),
         run: vi.fn().mockResolvedValue({ lastInsertRowid: 'new-plan-id', changes: 1 }),
       });
 

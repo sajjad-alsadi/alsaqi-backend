@@ -4,6 +4,8 @@ import express from 'express';
 import request from 'supertest';
 import { UserRole, ADMIN_ROLES, COMPLIANCE_ROLES } from '@alsaqi/shared';
 import { globalErrorHandler } from '../../middleware/error';
+import { NotFoundError } from '../../utils/errors';
+import { CRUD_EXCLUDED_ROUTES } from '../../utils/crudGenerator';
 
 /**
  * Integration Tests - Compliance Routes
@@ -14,9 +16,21 @@ import { globalErrorHandler } from '../../middleware/error';
  */
 
 // Mock ComplianceService
+// getSummary mirrors the ACTUAL service shape: { counts: [...], overdueReview, dueSoon }
+// where `counts` is the grouped GROUP BY compliance_status result set.
+const SUMMARY_FIXTURE = {
+  counts: [
+    { compliance_status: 'compliant', count: 5 },
+    { compliance_status: 'non_compliant', count: 2 },
+    { compliance_status: 'under_review', count: 1 },
+  ],
+  overdueReview: 3,
+  dueSoon: 4,
+};
+
 const mockComplianceService = {
   getAll: vi.fn().mockResolvedValue([]),
-  getSummary: vi.fn().mockResolvedValue({ compliant: 5, partial: 3, non_compliant: 2, under_review: 1 }),
+  getSummary: vi.fn().mockResolvedValue(SUMMARY_FIXTURE),
   getById: vi.fn().mockResolvedValue({ id: 'comp-1', title: 'Test Item' }),
   create: vi.fn().mockResolvedValue({ id: 'comp-new', ref_number: 'CMP-001' }),
   update: vi.fn().mockResolvedValue(undefined),
@@ -62,8 +76,13 @@ function createComplianceTestApp(options?: {
   };
 
   const authorize = (_module: string, action?: string) => (req: any, res: any, next: any) => {
-    // Simple permission check: Admin and Manager can do everything,
-    // Compliance Officer can Create/Edit compliance items but not Delete
+    // Permission model mirrored from the real RBAC layer for these tests:
+    //  - Admin / Manager   → all actions (incl. View, Create, Edit, Delete)
+    //  - Compliance Officer → View / Create / Edit (NOT Delete)
+    //  - Viewer             → View only (read routes)
+    //  - everyone else      → denied
+    // Read routes (GET /, /summary, /:id) call checkPermission(..., 'View'),
+    // so a role without the View grant is rejected with 403.
     const role = req.user?.role;
     if (!role) {
       return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
@@ -71,7 +90,10 @@ function createComplianceTestApp(options?: {
     if (['Admin', 'Manager'].includes(role)) {
       return next();
     }
-    if (role === 'Compliance Officer' && action && ['Create', 'Edit'].includes(action)) {
+    if (role === 'Compliance Officer' && action && ['View', 'Create', 'Edit'].includes(action)) {
+      return next();
+    }
+    if (action === 'View' && role === 'Viewer') {
       return next();
     }
     return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
@@ -151,6 +173,33 @@ describe('Compliance Integration Tests', () => {
       const res = await request(app).get('/api/compliance');
       expect(res.status).toBe(401);
     });
+
+    it('should allow a Viewer (holds ComplianceMatrix View permission) to read', async () => {
+      const { app: viewerApp } = createComplianceTestApp({
+        authenticatedRole: UserRole.VIEWER,
+      });
+
+      const res = await request(viewerApp)
+        .get('/api/compliance')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+
+    it('should return 403 on read when the role lacks View permission', async () => {
+      // Read routes enforce checkPermission('ComplianceMatrix', 'View'); a role
+      // without that grant (e.g. Risk Officer) is rejected with 403.
+      const { app: noViewApp } = createComplianceTestApp({
+        authenticatedRole: UserRole.RISK_OFFICER,
+      });
+
+      const res = await request(noViewApp)
+        .get('/api/compliance')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(res.status).toBe(403);
+    });
   });
 
   // ─── GET /api/compliance/summary ─────────────────────────────────────────
@@ -163,7 +212,14 @@ describe('Compliance Integration Tests', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ compliant: 5, partial: 3, non_compliant: 2, under_review: 1 });
+      expect(res.body.data).toEqual(SUMMARY_FIXTURE);
+      expect(res.body.data.counts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ compliance_status: 'compliant', count: 5 }),
+        ])
+      );
+      expect(res.body.data.overdueReview).toBe(3);
+      expect(res.body.data.dueSoon).toBe(4);
       expect(mockComplianceService.getSummary).toHaveBeenCalled();
     });
   });
@@ -180,6 +236,22 @@ describe('Compliance Integration Tests', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe('comp-1');
       expect(mockComplianceService.getById).toHaveBeenCalledWith('comp-1');
+    });
+
+    it('should return 404 when the item does not exist', async () => {
+      // getById throws NotFoundError for a missing item → mapped to HTTP 404
+      // by the global error handler (was previously a raw Error → 500).
+      mockComplianceService.getById.mockRejectedValueOnce(
+        new NotFoundError('Compliance item not found')
+      );
+
+      const res = await request(app)
+        .get('/api/compliance/non-existent')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(mockComplianceService.getById).toHaveBeenCalledWith('non-existent');
     });
   });
 
@@ -357,7 +429,7 @@ describe('Compliance Integration Tests', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockComplianceService.softDelete).toHaveBeenCalledWith('comp-1');
+      expect(mockComplianceService.softDelete).toHaveBeenCalledWith('comp-1', 'test-user-id');
     });
 
     it('should return 403 for Compliance Officer (DELETE requires ADMIN_ROLES only)', async () => {
@@ -394,6 +466,18 @@ describe('Compliance Integration Tests', () => {
         .set('Authorization', 'Bearer valid-token');
 
       expect(res.status).toBe(200);
+    });
+  });
+
+  // ─── Canonical route uniqueness ──────────────────────────────────────────
+
+  describe('Canonical route uniqueness', () => {
+    it('should exclude the generic compliance-items route so /api/v1/compliance is the single canonical route', () => {
+      // The duplicate /api/compliance-items route was eliminated by adding
+      // 'compliance-items' to CRUD_EXCLUDED_ROUTES; generateRoutes() therefore
+      // skips registering the generic route, leaving the dedicated
+      // createComplianceRoutes (/api/v1/compliance) as the only write path.
+      expect(CRUD_EXCLUDED_ROUTES).toContain('compliance-items');
     });
   });
 });

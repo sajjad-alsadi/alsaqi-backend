@@ -162,14 +162,21 @@ export const TABLE_WRITE_SCHEMAS: Record<string, WriteSchema> = {
   compliance_items: z.object({
     ref_number: text(),
     title: text(),
-    type: text(),
+    source_type: text(),
     issuing_authority: text(),
+    category: text(),
     issue_date: date(),
     effective_date: date(),
+    review_date: date(),
     compliance_status: text(),
+    maturity_score: num(),
+    gap_notes: text(),
     responsible_person_id: text(),
+    department_id: text(),
+    description: text(),
+    keywords: text(),
+    version: text(),
     attachment_path: text(),
-    notes: text(),
   }),
 
   central_bank_instructions: z.object({

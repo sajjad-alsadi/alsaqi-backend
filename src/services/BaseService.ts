@@ -239,16 +239,26 @@ export class BaseService {
 
       const placeholders = keys.map(() => "?").join(",");
       const validatedTable = this.db.validateIdentifier(tableName);
-      const stmt = this.db.prepare(`INSERT INTO ${validatedTable} (${keys.join(",")}) VALUES (${placeholders})`);
-      const info = await stmt.run(...values) as any;
+
+      // Obtain the real primary key of the inserted row via an explicit
+      // `RETURNING id` executed through `get()` — mirroring how `update`/`delete`
+      // already read back `RETURNING id`. This works correctly under Postgres and
+      // PGlite (which have no SQLite `lastInsertRowid` concept). Using `get()`
+      // (rather than `run()`) is deliberate: `get()` runs the SQL verbatim, while
+      // `run()` would append its own `RETURNING *` to a `RETURNING`-less INSERT —
+      // so routing the explicit `RETURNING id` through `get()` guarantees a single
+      // RETURNING clause and never produces a double-RETURNING statement.
+      const insertQuery = `INSERT INTO ${validatedTable} (${keys.join(",")}) VALUES (${placeholders}) RETURNING id`;
+      const insertedRow = await this.db.prepare(insertQuery).get(...values) as { id: string | number } | undefined;
+      const newId = insertedRow?.id;
 
       // --- AUTOMATION: buffer event for dispatch after commit (Req 20.1) ---
       enqueueEvent({
         name: `${tableName}.created`,
-        payload: { id: info.lastInsertRowid, ...body },
+        payload: { id: newId, ...body },
       });
 
-      return { id: info.lastInsertRowid, ...body };
+      return { id: newId, ...body };
     });
   }
 

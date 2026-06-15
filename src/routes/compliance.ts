@@ -13,7 +13,7 @@ const itemSchema = z.object({
   issue_date:            z.string().optional().nullable(),
   effective_date:        z.string().optional().nullable(),
   review_date:           z.string().optional().nullable(),
-  compliance_status:     z.enum(['compliant', 'partial', 'non_compliant', 'under_review']).optional(),
+  compliance_status:     z.enum(['compliant', 'non_compliant', 'under_review']).optional(),
   maturity_score:        z.coerce.number().min(0).max(100).optional().nullable(),
   gap_notes:             z.string().optional().nullable(),
   responsible_person_id: z.string().uuid().optional().nullable(),
@@ -30,23 +30,31 @@ export const createComplianceRoutes = (
   const router = Router();
 
   // GET /compliance
-  router.get('/', authenticate, asyncHandler(async (req: any, res: any) => {
-    const { source_type, compliance_status, search } = req.query as any;
-    const data = await ComplianceService.getAll({ source_type, compliance_status, search });
-    res.json({ success: true, data });
-  }));
+  router.get('/', authenticate, checkPermission('ComplianceMatrix', 'View'),
+    asyncHandler(async (req: any, res: any) => {
+      const { source_type, compliance_status, search } = req.query as any;
+      const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+      const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string, 10) || 20));
+      const data = await ComplianceService.getAll({ source_type, compliance_status, search, page, pageSize });
+      res.json({ success: true, data });
+    })
+  );
 
   // GET /compliance/summary
-  router.get('/summary', authenticate, asyncHandler(async (_req: any, res: any) => {
-    const data = await ComplianceService.getSummary();
-    res.json({ success: true, data });
-  }));
+  router.get('/summary', authenticate, checkPermission('ComplianceMatrix', 'View'),
+    asyncHandler(async (_req: any, res: any) => {
+      const data = await ComplianceService.getSummary();
+      res.json({ success: true, data });
+    })
+  );
 
   // GET /compliance/:id
-  router.get('/:id', authenticate, asyncHandler(async (req: any, res: any) => {
-    const data = await ComplianceService.getById(req.params.id);
-    res.json({ success: true, data });
-  }));
+  router.get('/:id', authenticate, checkPermission('ComplianceMatrix', 'View'),
+    asyncHandler(async (req: any, res: any) => {
+      const data = await ComplianceService.getById(req.params.id);
+      res.json({ success: true, data });
+    })
+  );
 
   // POST /compliance
   router.post('/', authenticate, checkPermission('ComplianceMatrix', 'Create'),
@@ -88,7 +96,7 @@ export const createComplianceRoutes = (
   router.patch('/:id/status', authenticate, checkPermission('ComplianceMatrix', 'Edit'),
     asyncHandler(async (req: any, res: any) => {
       const { compliance_status } = req.body;
-      const allowed = ['compliant', 'partial', 'non_compliant', 'under_review'];
+      const allowed = ['compliant', 'non_compliant', 'under_review'];
       if (!allowed.includes(compliance_status)) {
         throw new ValidationError('Invalid status value');
       }
@@ -100,7 +108,7 @@ export const createComplianceRoutes = (
   // DELETE /compliance/:id
   router.delete('/:id', authenticate, checkPermission('ComplianceMatrix', 'Delete'),
     asyncHandler(async (req: any, res: any) => {
-      await ComplianceService.softDelete(req.params.id);
+      await ComplianceService.softDelete(req.params.id, req.user.id);
       res.json({ success: true });
     })
   );

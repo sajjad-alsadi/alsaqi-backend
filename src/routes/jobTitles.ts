@@ -5,9 +5,12 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ValidationError } from '../utils/errors';
 
 const jobTitleSchema = z.object({
-  title_ar: z.string().min(1).max(255),
-  title_en: z.string().optional().nullable(),
-  level: z.string().optional().nullable(),
+  name:         z.string().min(1).max(255),
+  department:   z.string().min(1),
+  job_level:    z.string().min(1),
+  description:  z.string().optional().nullable(),
+  reporting_to: z.string().uuid().optional().nullable().or(z.literal('')),
+  status:       z.string().optional().nullable(),
 });
 
 export const createJobTitleRoutes = (

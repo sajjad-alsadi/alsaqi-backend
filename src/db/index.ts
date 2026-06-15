@@ -38,6 +38,8 @@ export type DBRow = Record<string, unknown>;
 export interface DBQueryResult<R = DBRow> {
   rows: R[];
   rowCount?: number | null;
+  /** PGlite reports affected-row counts here (the `pg` driver uses `rowCount`). */
+  affectedRows?: number | null;
 }
 
 /**
@@ -588,7 +590,7 @@ export class DBWrapper {
                   const insertedRow = res.rows ? (res.rows[0] as DBRow | undefined) : undefined;
                   return { 
                     lastInsertRowid: ((insertedRow?.id as number) || 0), 
-                    changes: res.rowCount || 0 
+                    changes: res.rowCount ?? res.affectedRows ?? 0 
                   };
               } catch (e: any) {
                   console.error(`[DB ERROR] RUN (INSERT): ${finalSql}`, e);
@@ -599,7 +601,7 @@ export class DBWrapper {
               const res = await executeWithRetry(conn => conn.query(finalSql, params));
               const durationMs = performance.now() - startTime;
               checkSlowQuery(finalSql, durationMs);
-              return { lastInsertRowid: 0, changes: res.rowCount || 0 };
+              return { lastInsertRowid: 0, changes: res.rowCount ?? res.affectedRows ?? 0 };
           }
         } catch (error) {
           if (!(error as any).message?.includes('does not exist')) {

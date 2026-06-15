@@ -5,7 +5,8 @@ import { DepartmentService } from '../services/DepartmentService';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ValidationError } from '../utils/errors';
 
-const departmentSchema = z.object({
+// Base object schema (no refinements) — safe to call .partial() on for updates
+const departmentBaseSchema = z.object({
   // Legacy field — maps to name_ar for backward compatibility
   name:              z.string().min(1).max(255).optional(),
   // Full fields
@@ -19,7 +20,10 @@ const departmentSchema = z.object({
   location:          z.string().optional().nullable(),
   cost_center_code:  z.string().optional().nullable(),
   status:            z.enum(['Active', 'Inactive', 'Archived']).optional(),
-}).refine(d => d.name_ar || d.name, {
+});
+
+// Create schema enforces that a name is provided
+const departmentSchema = departmentBaseSchema.refine(d => d.name_ar || d.name, {
   message: 'name_ar or name is required',
 });
 
@@ -58,7 +62,7 @@ export const createDepartmentRoutes = (
   }));
 
   router.put('/:id', authenticate, checkPermission('Departments', 'Edit'), asyncHandler(async (req, res) => {
-    const parsed = departmentSchema.partial().safeParse(req.body);
+    const parsed = departmentBaseSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError('Invalid data', parsed.error.format());
     const d = parsed.data;
     const result = await DepartmentService.update(String(req.params.id), {

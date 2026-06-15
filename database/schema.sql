@@ -363,15 +363,22 @@ CREATE TABLE IF NOT EXISTS compliance_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     ref_number TEXT NOT NULL,
     title TEXT NOT NULL,
-    type TEXT NOT NULL,
+    source_type TEXT NOT NULL,
     issuing_authority TEXT,
-    issue_date DATE,
-    effective_date DATE,
+    category TEXT,
+    issue_date TEXT,
+    effective_date TEXT,
+    review_date TEXT,
     compliance_status TEXT NOT NULL DEFAULT 'under_review'
-        CHECK (compliance_status IN ('compliant', 'non_compliant', 'under_review', 'partially_compliant')),
+        CHECK (compliance_status IN ('compliant', 'non_compliant', 'under_review')),
+    maturity_score INTEGER CHECK (maturity_score BETWEEN 0 AND 100),
+    gap_notes TEXT,
     responsible_person_id UUID REFERENCES users(id),
+    department_id UUID REFERENCES org_entities(id),
+    description TEXT,
+    keywords TEXT,
+    version TEXT,
     attachment_path TEXT,
-    notes TEXT,
     created_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -635,11 +642,11 @@ COMMENT ON TABLE finding_risks IS 'ربط الملاحظات بالمخاطر - 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS finding_compliance (
     finding_id UUID NOT NULL REFERENCES audit_findings(id) ON DELETE CASCADE,
-    compliance_id UUID NOT NULL REFERENCES central_bank_instructions(id),
+    compliance_id UUID NOT NULL REFERENCES compliance_items(id),
     PRIMARY KEY (finding_id, compliance_id)
 );
 
-COMMENT ON TABLE finding_compliance IS 'ربط الملاحظات بتعليمات البنك المركزي';
+COMMENT ON TABLE finding_compliance IS 'ربط الملاحظات بعناصر الامتثال';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- تعيين مهام التدقيق (متعدد المدققين)
