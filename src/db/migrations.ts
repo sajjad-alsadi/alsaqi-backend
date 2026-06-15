@@ -1067,14 +1067,24 @@ export const runMigrations = async () => {
     }
 
     // Ensure the unified compliance_status CHECK constraint exists even when the
-    // table was created from the older, unconstrained definition above. Guarded
-    // so idempotent re-runs (constraint already present) are safely ignored.
+    // table was created from the older, unconstrained definition above. Check the
+    // catalog first (Postgres has no ADD CONSTRAINT IF NOT EXISTS) so idempotent
+    // re-runs don't emit a noisy duplicate-constraint DB error.
     try {
-      await db.prepare(
-        `ALTER TABLE compliance_items ADD CONSTRAINT compliance_items_compliance_status_check ` +
-        `CHECK (compliance_status IN ('compliant', 'non_compliant', 'under_review'))`
-      ).run();
-    } catch (_) { /* constraint already exists */ }
+      const existingCheck = await db.prepare(
+        "SELECT 1 FROM pg_constraint WHERE conname = ?"
+      ).get('compliance_items_compliance_status_check');
+      if (!existingCheck) {
+        await db.prepare(
+          `ALTER TABLE compliance_items ADD CONSTRAINT compliance_items_compliance_status_check ` +
+          `CHECK (compliance_status IN ('compliant', 'non_compliant', 'under_review'))`
+        ).run();
+      }
+    } catch (e: any) {
+      if (!e.message?.includes('already exists')) {
+        console.warn(`[MIGRATION] Could not add compliance_status check constraint: ${e.message}`);
+      }
+    }
 
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS finding_compliance (
