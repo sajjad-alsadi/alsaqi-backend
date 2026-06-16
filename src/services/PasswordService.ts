@@ -3,8 +3,8 @@ import bcrypt from 'bcryptjs';
 import { db } from '../db/index';
 import { NotFoundError, ValidationError, AuthError } from '../utils/errors';
 import { invalidateUserCache } from '../middleware/auth';
-import { UserRole } from '@alsaqi/shared';
 import { validatePasswordPolicy } from './passwordPolicy';
+import { NotificationService } from './NotificationService';
 
 export class PasswordService {
   static async requestReset(username: string) {
@@ -22,13 +22,13 @@ export class PasswordService {
     await db.prepare(`INSERT INTO password_reset_requests (user_id, username, name, department) VALUES (?::uuid, ?::text, ?::text, ?::text)`)
       .run(user.id, user.username, user.name, user.department);
     
-    const admins = await db.prepare(`SELECT id FROM users WHERE role = ?`).all(UserRole.ADMIN) as {id: number}[];
+    const adminIds = await NotificationService.getAdminIds();
     const alertMsg = `Password Reset Request\nUsername: ${user.username}\nName: ${user.name}\nDepartment: ${user.department || 'N/A'}`;
     
     return {
       success: true,
       user,
-      admins,
+      adminIds,
       alertMsg
     };
   }
@@ -173,6 +173,32 @@ export class PasswordService {
   }
 
   static async getResetRequests() {
-    return await db.prepare("SELECT * FROM password_reset_requests WHERE status = 'Pending' ORDER BY request_date DESC").all();
+    return await db.prepare(`
+      SELECT
+        r.id,
+        r.username,
+        u.email,
+        r.name,
+        r.department,
+        r.status,
+        r.request_date AS requested_at
+      FROM password_reset_requests r
+      JOIN users u ON u.id = r.user_id
+      WHERE r.status = 'Pending'
+      ORDER BY r.request_date DESC
+    `).all();
+  }
+
+  static async rejectReset(requestId: string, adminId: string) {
+    const request = await db.prepare(
+      "SELECT id FROM password_reset_requests WHERE id = ?"
+    ).get(requestId) as any;
+    if (!request) throw new NotFoundError("Request not found");
+
+    await db.prepare(
+      `UPDATE password_reset_requests
+       SET status = 'Rejected', resolved_date = CURRENT_TIMESTAMP, resolved_by = ?::uuid
+       WHERE id = ?::uuid`
+    ).run(adminId, requestId);
   }
 }

@@ -36,9 +36,12 @@ export function generateCsrfToken(byteLength = 32): string {
  * and a response header, allowing the client to read and send it back.
  */
 export function attachCsrfToken(res: Response, token: string): void {
-  // Set as a non-httpOnly cookie so client-side JS can read it
+  const isProduction = process.env.NODE_ENV === 'production';
+  // Set as a non-httpOnly cookie so client-side JS can read and send it back.
+  // secure: true in production so the cookie is only sent over HTTPS.
   res.cookie('csrf-token', token, {
     httpOnly: false,
+    secure: isProduction,
     sameSite: 'strict',
     path: '/',
   });

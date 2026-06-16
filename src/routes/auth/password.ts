@@ -1,6 +1,7 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
 import { PasswordService } from '../../services/PasswordService';
 import { AuthService } from '../../services/AuthService';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -28,11 +29,15 @@ const buildAuthCookieOptions = () => {
 };
 
 const forgotPasswordSchema = z.object({
-  username: z.string().min(1)
+  usernameOrEmail: z.string().min(1)
 });
 
 const approveResetSchema = z.object({
   requestId: z.string().min(1)
+});
+
+const rejectResetSchema = z.object({
+  requestId: z.string().uuid()
 });
 
 const changePasswordSchema = z.object({
@@ -44,6 +49,22 @@ const updatePasswordSchema = z.object({
   newPassword: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100)
 });
 
+/**
+ * Dedicated rate limiter for the forgot-password endpoint.
+ * Stricter than the general authLimiter: max 3 requests per 15-minute window per IP.
+ * Using a module-level instance so it maintains state across requests.
+ */
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => ipKeyGenerator(req.ip ?? 'no-ip'),
+  handler: (_req, res) => {
+    res.status(429).json({ error: 'TOO_MANY_ATTEMPTS' });
+  },
+});
+
 export const createPasswordRoutes = (
   db: any,
   JWT_SECRET: string,
@@ -52,27 +73,28 @@ export const createPasswordRoutes = (
   authenticate: any,
   checkPermission: any,
   createNotification: any,
-  logError: any
+  logError: any,
+  forgotPwLimiter: any = forgotPasswordLimiter,
 ) => {
   const router = express.Router();
 
   // Forgot Password
-  router.post("/forgot-password", authLimiter, asyncHandler(async (req, res) => {
+  router.post("/forgot-password", forgotPwLimiter, asyncHandler(async (req, res) => {
     const validation = forgotPasswordSchema.safeParse(req.body);
     if (!validation.success) {
       throw new ValidationError("Invalid username", validation.error.format());
     }
-    const { username } = validation.data;
-    const result = await PasswordService.requestReset(username);
+    const { usernameOrEmail } = validation.data;
+    const result = await PasswordService.requestReset(usernameOrEmail);
     
-    if (result.user && result.admins) {
-      for (const admin of result.admins) {
-        await createNotification(admin.id, 'password_reset_request', result.alertMsg, 'Security', '/users', { actorId: result.user.id, wss: (req.app as any).wss });
+    if (result.user && result.adminIds) {
+      for (const adminId of result.adminIds) {
+        await createNotification(adminId, 'password_reset_request', result.alertMsg, 'Security', '/users', { actorId: result.user.id, wss: (req.app as any).wss });
       }
       await AuthService.logAudit(result.user.username, "Password Reset Request", "Security", "User requested password reset");
     }
 
-    res.json({ success: true, message: result.message });
+    res.json({ success: true });
   }));
 
   // Check Reset Status
@@ -101,6 +123,19 @@ export const createPasswordRoutes = (
     await AuthService.logAudit((req as any).user.username, "Admin Password Reset", "Security", `Admin reset password for user: ${result.username}. Request ID: ${requestId}`);
 
     res.json({ success: true, tempPassword: result.tempPassword });
+  }));
+
+  // Admin: Reject Reset Request
+  router.post("/reject-reset", authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
+    const validation = rejectResetSchema.safeParse(req.body);
+    if (!validation.success) {
+      throw new ValidationError("Invalid request ID", validation.error.format());
+    }
+    const { requestId } = validation.data;
+    const adminId = (req as any).user.id;
+    await PasswordService.rejectReset(requestId, adminId);
+
+    res.json({ success: true });
   }));
 
   // User: Change Password (Mandatory or Voluntary)
