@@ -38,6 +38,14 @@ import { notFoundHandler } from './middleware/notFoundHandler.js';
 import { createV1Router } from './routes/v1/index.js';
 import type { V1RouterDeps } from './routes/v1/index.js';
 
+// ─── Express App Augmentation ────────────────────────────────────────────────
+declare module 'express-serve-static-core' {
+  interface Application {
+    wss: import('ws').WebSocketServer;
+    serverConfig: ApiServerConfig;
+  }
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface ApiServerConfig {
@@ -122,10 +130,10 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   });
 
   // Expose WebSocket server to routes via app
-  (app as any).wss = wss;
+  app.wss = wss;
 
   // Store config on app for middleware/routes to access
-  (app as any).serverConfig = config;
+  app.serverConfig = config;
 
   // ─── Middleware Stack ─────────────────────────────────────────────────────────
 
@@ -210,6 +218,8 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
       '/api/v1/auth/refresh',
       '/api/v1/auth/register',
       '/api/v1/auth/forgot-password',
+      '/api/metrics/web-vitals',
+      '/api/v1/metrics/web-vitals',
     ],
     tokenHeader: 'x-csrf-token',
     cookieName: 'csrf-token',
@@ -231,6 +241,67 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
 
   app.get('/api/v1/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  // ─── Readiness Probe ──────────────────────────────────────────────────────────
+  // Verifies actual DB and Redis connectivity (for load balancer routing decisions)
+  app.get('/api/health/ready', async (_req, res) => {
+    const checks: Record<string, string> = {};
+    let healthy = true;
+
+    // Check PostgreSQL connectivity
+    try {
+      const { db: database } = await import('./db/index.js');
+      await database.prepare('SELECT 1').get();
+      checks.database = 'ok';
+    } catch (e) {
+      checks.database = 'failed';
+      healthy = false;
+    }
+
+    // Check Redis connectivity (only if enabled)
+    try {
+      const { redisManager } = await import('./cache/redisManager.js');
+      if (redisManager.status === 'connected') {
+        checks.redis = 'ok';
+      } else {
+        checks.redis = 'not_connected';
+        // Redis is optional — don't mark unhealthy if it was intentionally disabled
+      }
+    } catch (e) {
+      checks.redis = 'unavailable';
+    }
+
+    const status = healthy ? 200 : 503;
+    res.status(status).json({ status: healthy ? 'ready' : 'degraded', checks, timestamp: new Date().toISOString() });
+  });
+
+  app.get('/api/v1/health/ready', async (_req, res) => {
+    const checks: Record<string, string> = {};
+    let healthy = true;
+
+    try {
+      const { db: database } = await import('./db/index.js');
+      await database.prepare('SELECT 1').get();
+      checks.database = 'ok';
+    } catch (e) {
+      checks.database = 'failed';
+      healthy = false;
+    }
+
+    try {
+      const { redisManager } = await import('./cache/redisManager.js');
+      if (redisManager.status === 'connected') {
+        checks.redis = 'ok';
+      } else {
+        checks.redis = 'not_connected';
+      }
+    } catch (e) {
+      checks.redis = 'unavailable';
+    }
+
+    const status = healthy ? 200 : 503;
+    res.status(status).json({ status: healthy ? 'ready' : 'degraded', checks, timestamp: new Date().toISOString() });
   });
 
   // ─── Versioned Routes (v1) ──────────────────────────────────────────────────

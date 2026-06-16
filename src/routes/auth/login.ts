@@ -59,8 +59,8 @@ export const createLoginRoutes = (
     const cookieOptions: any = { 
       httpOnly: true, 
       secure: isProduction, 
-      sameSite: isProduction ? 'none' : 'lax', 
-      path: '/' 
+      sameSite: 'lax', 
+      path: '/api' 
     };
 
     res.cookie('token', result.token, {
@@ -72,7 +72,7 @@ export const createLoginRoutes = (
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
       secure: isProduction, 
-      sameSite: isProduction ? 'none' : 'lax', 
+      sameSite: 'lax', 
       path: getRefreshCookiePath(), // Restrict cookie to the configured refresh endpoint path (Req 19.1)
       maxAge: rememberMe ? 30 * 24 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000 // 30 days or 8 hours in ms
     });
@@ -83,8 +83,8 @@ export const createLoginRoutes = (
     const csrfToken = generateCsrfToken();
     attachCsrfToken(res, csrfToken);
 
-    // Return ONLY the access token in the response body:
-    res.json({ user: result.user, token: result.token });
+    // Return user info only — token is delivered via httpOnly cookie
+    res.json({ user: result.user });
   }));
 
   return router;

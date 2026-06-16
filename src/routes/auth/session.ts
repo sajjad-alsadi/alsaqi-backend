@@ -32,24 +32,8 @@ export const createSessionRoutes = (
     // role grants UNION user allow-overrides, then SUBTRACT explicit user denies
     // (is_allowed = 0) via the trailing EXCEPT clause so an explicit deny overrides a
     // grant, matching PermissionService.resolvePermission semantics (finding 1.28).
-    let permissions: Array<{ module: string; action: string }> = [];
-    try {
-      permissions = await db.prepare(`
-        SELECT p.module, p.action FROM permissions p
-        JOIN role_permissions rp ON p.id = rp.permission_id
-        WHERE rp.role_id = (SELECT role_id FROM users WHERE id = ?)
-        UNION
-        SELECT p.module, p.action FROM permissions p
-        JOIN user_permissions up ON p.id = up.permission_id
-        WHERE up.user_id = ? AND up.is_allowed = 1
-        EXCEPT
-        SELECT p.module, p.action FROM permissions p
-        JOIN user_permissions up ON p.id = up.permission_id
-        WHERE up.user_id = ? AND up.is_allowed = 0
-      `).all(user.id, user.id, user.id) as Array<{ module: string; action: string }>;
-    } catch (e) {
-      console.error("[Session] Failed to fetch permissions:", e);
-    }
+    const { PermissionService } = await import('../../services/PermissionService.js');
+    const permissions = await PermissionService.getEffectivePermissions(user.id);
 
     res.json({ user: { ...user, permissions } });
   }));
@@ -75,15 +59,15 @@ export const createSessionRoutes = (
       const cookieOptions: any = {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
-        path: '/'
+        sameSite: 'lax',
+        path: '/api'
       };
 
       // Refresh Token: Cookie-Only Storage
       res.cookie('refreshToken', result.refreshToken, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
+        sameSite: 'lax',
         path: getRefreshCookiePath(), // Restrict cookie to the configured refresh endpoint path (Req 19.1)
         maxAge: result.rememberMe ? 30 * 24 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000 // 30 days or 8 hours in ms
       });
@@ -103,7 +87,7 @@ export const createSessionRoutes = (
     } catch (error) {
       // Clear cookies with same options
       const isProduction = process.env.NODE_ENV === 'production';
-      const clearOptions: any = { httpOnly: true, secure: isProduction, sameSite: isProduction ? 'none' : 'lax', path: '/' };
+      const clearOptions: any = { httpOnly: true, secure: isProduction, sameSite: 'lax', path: '/api' };
       const refreshClearOptions: any = { ...clearOptions, path: getRefreshCookiePath() };
       res.clearCookie('refreshToken', refreshClearOptions);
       res.clearCookie('token', clearOptions);
@@ -122,7 +106,7 @@ export const createSessionRoutes = (
 
     // Clear cookies with same options
     const isProduction = process.env.NODE_ENV === 'production';
-    const clearOptions: any = { httpOnly: true, secure: isProduction, sameSite: isProduction ? 'none' : 'lax', path: '/' };
+    const clearOptions: any = { httpOnly: true, secure: isProduction, sameSite: 'lax', path: '/api' };
     const refreshClearOptions: any = { ...clearOptions, path: getRefreshCookiePath() };
     res.clearCookie('refreshToken', refreshClearOptions);
     res.clearCookie('token', clearOptions);

@@ -512,16 +512,16 @@ describe('CRUD Generator Integration Tests', () => {
       );
     });
 
-    it('GET /api/audit-tasks should return 404 (excluded from CRUD generator, handled by custom routes)', async () => {
+    it('GET /api/audit-tasks should return 404 (removed from CRUD generator, handled by custom routes)', async () => {
       const req = createAuthenticatedRequest(app);
       const res = await req.get('/api/audit-tasks');
 
-      // audit-tasks is excluded from CRUD generator (CRUD_EXCLUDED_ROUTES)
-      // and handled by dedicated custom route module instead
+      // audit-tasks generateRoutes call was removed from CRUD generator
+      // and is handled by dedicated custom route module instead
       expect(res.status).toBe(404);
     });
 
-    it('POST /api/audit-tasks should return 404 (excluded from CRUD generator, handled by custom routes)', async () => {
+    it('POST /api/audit-tasks should return 404 (removed from CRUD generator, handled by custom routes)', async () => {
       const testApp = createCrudTestApp();
       const req = createAuthenticatedRequest(testApp.app);
       const res = await req.post('/api/audit-tasks').send({
@@ -531,17 +531,17 @@ describe('CRUD Generator Integration Tests', () => {
         audit_type: 'Financial',
       });
 
-      // audit-tasks is excluded from CRUD generator (CRUD_EXCLUDED_ROUTES)
+      // audit-tasks generateRoutes call was removed from CRUD generator
       // Notifications for audit-tasks are handled by the custom route module
       expect(res.status).toBe(404);
     });
 
-    it('GET /api/recommendations should return 404 (excluded from CRUD generator, handled by custom routes)', async () => {
+    it('GET /api/recommendations should return 404 (removed from CRUD generator, handled by custom routes)', async () => {
       const req = createAuthenticatedRequest(app);
       const res = await req.get('/api/recommendations');
 
-      // recommendations is excluded from CRUD generator (CRUD_EXCLUDED_ROUTES)
-      // and handled by dedicated custom route module instead
+      // recommendations generateRoutes call was removed from CRUD generator
+      // and is handled by dedicated custom route module instead
       expect(res.status).toBe(404);
     });
 
@@ -556,11 +556,11 @@ describe('CRUD Generator Integration Tests', () => {
       expect(mockBaseService.delete).toHaveBeenCalledWith('fraud_log', 'fraud-1');
     });
 
-    it('GET /api/compliance-items should return 404 (excluded from CRUD generator, served by canonical /api/v1/compliance route)', async () => {
+    it('GET /api/compliance-items should return 404 (removed from CRUD generator, served by canonical /api/v1/compliance route)', async () => {
       const req = createAuthenticatedRequest(app);
       const res = await req.get('/api/compliance-items');
 
-      // compliance-items is excluded from the CRUD generator (CRUD_EXCLUDED_ROUTES)
+      // compliance-items generateRoutes call was removed from CRUD generator
       // because it is served exclusively by the canonical custom route
       // /api/v1/compliance. The generic /api/compliance-items route is therefore
       // never registered, so it is not mounted and returns 404.

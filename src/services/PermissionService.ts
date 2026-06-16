@@ -301,6 +301,31 @@ export class PermissionService {
     }
   }
 
+  /**
+   * Fetches the effective permissions for a user.
+   * Effective permissions = role grants UNION user allow-overrides EXCEPT explicit denies.
+   */
+  static async getEffectivePermissions(userId: string): Promise<Array<{ module: string; action: string }>> {
+    try {
+      return await db.prepare(`
+        SELECT p.module, p.action FROM permissions p
+        JOIN role_permissions rp ON p.id = rp.permission_id
+        WHERE rp.role_id = (SELECT role_id FROM users WHERE id = ?::uuid)
+        UNION
+        SELECT p.module, p.action FROM permissions p
+        JOIN user_permissions up ON p.id = up.permission_id
+        WHERE up.user_id = ?::uuid AND up.is_allowed = 1
+        EXCEPT
+        SELECT p.module, p.action FROM permissions p
+        JOIN user_permissions up ON p.id = up.permission_id
+        WHERE up.user_id = ?::uuid AND up.is_allowed = 0
+      `).all(userId, userId, userId) as Array<{ module: string; action: string }>;
+    } catch (e) {
+      console.error("[PermissionService] Failed to fetch effective permissions:", e);
+      return [];
+    }
+  }
+
   // ─── Private Helpers ───────────────────────────────────────────────────────
 
   /**

@@ -4,10 +4,12 @@ import { UserService } from '../services/UserService';
 import { AuthService } from '../services/AuthService';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ValidationError, NotFoundError } from '../utils/errors';
-import { validateSchema } from '../middleware/validate';
+import { validateSchema, validateIdParam } from '../middleware/validate';
 import { invalidateUserCache } from '../middleware/auth';
 import { UserRole, AccessScope } from '@alsaqi/shared';
 import { DEFAULT_PASSWORD_MIN_LENGTH } from '../services/passwordPolicy';
+import { createSuccessResponse, createErrorResponse, computePagination } from '../utils/responseEnvelope.js';
+import { lastAdminGuard } from '../middleware/lastAdminGuard.js';
 
 const userSchema = z.object({
   username: z.string().min(3).max(50).optional(),
@@ -40,29 +42,34 @@ export const createUserRoutes = (
 
   router.get(`/init`, authenticate, checkPermission('UserManagement', 'View'), asyncHandler(async (req, res) => {
     const data = await UserService.getInitData();
-    res.json(data);
+    res.json(createSuccessResponse({ data }));
   }));
 
   router.get(`/`, authenticate, checkPermission('UserManagement', 'View'), asyncHandler(async (req, res) => {
+    const page = Number(req.query.page) || 1;
+    const pageSize = Number(req.query.pageSize) || 20;
     const result = await UserService.getUsers(req.query);
-    res.json(result);
+    res.json(createSuccessResponse({
+      data: result.data,
+      pagination: computePagination({ page, pageSize, total: result.total }),
+    }));
   }));
 
   router.get(`/summary`, authenticate, checkPermission('UserManagement', 'View'), asyncHandler(async (req, res) => {
     const summary = await UserService.getUserSummary();
-    res.json(summary);
+    res.json(createSuccessResponse({ data: summary }));
   }));
 
   router.get(`/list`, authenticate, asyncHandler(async (req, res) => {
     const data = await UserService.getActiveUsers();
-    res.json(data);
+    res.json(createSuccessResponse({ data }));
   }));
 
-  router.get(`/:id`, authenticate, checkPermission('UserManagement', 'View'), asyncHandler(async (req, res) => {
+  router.get(`/:id`, authenticate, checkPermission('UserManagement', 'View'), validateIdParam(), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const user = await UserService.getUserById(id);
     if (!user) throw new NotFoundError("User not found");
-    res.json(user);
+    res.json(createSuccessResponse({ data: user }));
   }));
 
   router.post(`/`, authenticate, checkPermission('UserManagement', 'Create'), validateSchema(userSchema), asyncHandler(async (req, res) => {
@@ -75,10 +82,10 @@ export const createUserRoutes = (
     
     await AuthService.logAudit((req as any).user.username, "Created User", "User Management", `Created user ${user.username} with role ${user.role}`);
       
-    res.json(user);
+    res.json(createSuccessResponse({ data: user }));
   }));
 
-  router.put(`/:id`, authenticate, checkPermission('UserManagement', 'Edit'), validateSchema(userSchema), asyncHandler(async (req, res) => {
+  router.put(`/:id`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), validateSchema(userSchema), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     
     const { oldUser } = await UserService.updateUser(id, req.body);
@@ -120,97 +127,58 @@ export const createUserRoutes = (
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Updated User", "User Management", `Updated user ID ${id}`);
       
-    res.json({ success: true });
+    res.json(createSuccessResponse({ data: { success: true } }));
   }));
 
-  router.post(`/:id/suspend`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
+  router.post(`/:id/suspend`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), lastAdminGuard(db) as any, asyncHandler(async (req, res) => {
     const id = req.params.id as string;
-    if ((req as any).user.id === req.params.id || (req as any).user.id === id) {
-      return res.status(403).json({ error: "Cannot perform this action on your own account" });
-    }
-    const targetUser = await db.prepare("SELECT role FROM users WHERE id = ?").get(id) as any;
     const currentStatus = await UserService.getStatus(id);
     const newStatus = currentStatus === 'Suspended' ? 'Active' : 'Suspended';
-    // The last-admin guard only applies when the action REMOVES an admin from active duty
-    // (i.e. suspending). Reactivating the sole suspended admin back to 'Active' must be allowed
-    // so the account is recoverable (Req 2.19).
-    if (newStatus !== 'Active' && targetUser && targetUser.role === UserRole.ADMIN) {
-      const adminCount = await db.prepare(
-        `SELECT COUNT(*) as count FROM users WHERE role = ? AND status = 'Active' AND id != ?`
-      ).get(UserRole.ADMIN, id) as any;
-      if (!adminCount || adminCount.count === 0) {
-        return res.status(403).json({ error: "Cannot remove the last admin user" });
-      }
-    }
     const username = await UserService.setStatus(id, newStatus);
     
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, `${newStatus === 'Suspended' ? 'Suspended' : 'Activated'} User`, "User Management", `Changed status for user ${username} to ${newStatus}`);
       
-    res.json({ success: true, status: newStatus });
+    res.json(createSuccessResponse({ data: { success: true, status: newStatus } }));
   }));
 
-  router.post(`/:id/archive`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
+  router.post(`/:id/archive`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), lastAdminGuard(db) as any, asyncHandler(async (req, res) => {
     const id = req.params.id as string;
-    if ((req as any).user.id === req.params.id || (req as any).user.id === id) {
-      return res.status(403).json({ error: "Cannot perform this action on your own account" });
-    }
-    const targetUser = await db.prepare("SELECT role FROM users WHERE id = ?").get(id) as any;
-    if (targetUser && targetUser.role === UserRole.ADMIN) {
-      const adminCount = await db.prepare(
-        `SELECT COUNT(*) as count FROM users WHERE role = ? AND status = 'Active' AND id != ?`
-      ).get(UserRole.ADMIN, id) as any;
-      if (!adminCount || adminCount.count === 0) {
-        return res.status(403).json({ error: "Cannot remove the last admin user" });
-      }
-    }
     const username = await UserService.setStatus(id, 'Archived');
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Archive", "User Management", `Archived user: ${username}`);
-    res.json({ success: true });
+    res.json(createSuccessResponse({ data: { success: true } }));
   }));
 
-  router.post(`/:id/activate`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
+  router.post(`/:id/activate`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const username = await UserService.activateUser(id);
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Activate", "User Management", `Activated user: ${username}`);
-    res.json({ success: true });
+    res.json(createSuccessResponse({ data: { success: true } }));
   }));
 
-  router.delete(`/:id`, authenticate, checkPermission('UserManagement', 'Delete'), asyncHandler(async (req, res) => {
+  router.delete(`/:id`, authenticate, checkPermission('UserManagement', 'Delete'), validateIdParam(), lastAdminGuard(db) as any, asyncHandler(async (req, res) => {
     const id = req.params.id as string;
-    if ((req as any).user.id === req.params.id || (req as any).user.id === id) {
-      return res.status(403).json({ error: "Cannot perform this action on your own account" });
-    }
-    const targetUser = await db.prepare("SELECT role FROM users WHERE id = ?").get(id) as any;
-    if (targetUser && targetUser.role === UserRole.ADMIN) {
-      const adminCount = await db.prepare(
-        `SELECT COUNT(*) as count FROM users WHERE role = ? AND status = 'Active' AND id != ?`
-      ).get(UserRole.ADMIN, id) as any;
-      if (!adminCount || adminCount.count === 0) {
-        return res.status(403).json({ error: "Cannot remove the last admin user" });
-      }
-    }
     const username = await UserService.deleteUser(id);
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Deleted User", "User Management", `Deleted user ${username}`);
-    res.json({ success: true });
+    res.json(createSuccessResponse({ data: { success: true } }));
   }));
 
-  router.post(`/:id/unlock`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
+  router.post(`/:id/unlock`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const username = await UserService.unlockUser(id);
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Unlocked User", "User Management", `Unlocked user ${username} and reset failed attempts`);
-    res.json({ success: true });
+    res.json(createSuccessResponse({ data: { success: true } }));
   }));
 
   const resetPasswordSchema = z.object({
     newPassword: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100)
   });
 
-  router.post(`/:id/reset-password`, authenticate, checkPermission('UserManagement', 'Edit'), asyncHandler(async (req, res) => {
+  router.post(`/:id/reset-password`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const validation = resetPasswordSchema.safeParse(req.body);
     if (!validation.success) {
@@ -222,7 +190,7 @@ export const createUserRoutes = (
     await invalidateUserCache(id);
     await AuthService.logAudit((req as any).user.username, "Reset Password", "User Management", `Reset password for user ${username}`);
       
-    res.json({ success: true });
+    res.json(createSuccessResponse({ data: { success: true } }));
   }));
 
   return router;

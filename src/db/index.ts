@@ -220,6 +220,11 @@ if (dbUrlClassification.kind === "valid-external") {
       idleTimeoutMillis: 30000,
     });
     isExternal = true;
+
+    // Handle idle client errors to prevent unhandled events from crashing the process (Req 2.5).
+    (client as pg.Pool).on('error', (err) => {
+      console.error('[DB Pool] Idle client error:', err.message || err);
+    });
   }
 } else {
   // DATABASE_URL is missing or an http(s) URL: no external pool is created.

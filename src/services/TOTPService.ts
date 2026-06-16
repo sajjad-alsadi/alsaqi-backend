@@ -170,6 +170,20 @@ export class TOTPServiceImpl implements TOTPService {
    * @returns true if the code is valid, false otherwise
    */
   async verify(userId: string, token: string): Promise<boolean> {
+    // Per-user 2FA attempt limiting: after 5 failed attempts within 15 minutes,
+    // block further 2FA verification to prevent brute-force attacks (Req 2FA.1).
+    const MAX_2FA_ATTEMPTS = 5;
+    const ATTEMPT_WINDOW_MINUTES = 15;
+    
+    const attemptRecord = await db.prepare(
+      `SELECT totp_failed_attempts, totp_locked_until FROM users WHERE id = ?`
+    ).get(userId) as any;
+    
+    if (attemptRecord?.totp_locked_until && new Date(attemptRecord.totp_locked_until) > new Date()) {
+      logger.warn(`[TOTPService] 2FA locked for user ${userId} until ${attemptRecord.totp_locked_until}`);
+      return false;
+    }
+
     // Read last_used_at alongside the secret so reuse within the validity
     // window can be rejected (replay protection).
     const record = await db.prepare(
@@ -199,6 +213,7 @@ export class TOTPServiceImpl implements TOTPService {
 
     if (delta === null) {
       logger.warn(`[TOTPService] TOTP verification failed for user ${userId}`);
+      await this.recordFailed2FAAttempt(userId, MAX_2FA_ATTEMPTS, ATTEMPT_WINDOW_MINUTES);
       return false;
     }
 
@@ -215,6 +230,7 @@ export class TOTPServiceImpl implements TOTPService {
 
     if (!constantTimeMatch) {
       logger.warn(`[TOTPService] TOTP verification failed for user ${userId}`);
+      await this.recordFailed2FAAttempt(userId, MAX_2FA_ATTEMPTS, ATTEMPT_WINDOW_MINUTES);
       return false;
     }
 
@@ -228,13 +244,17 @@ export class TOTPServiceImpl implements TOTPService {
       const lastUsedMs = new Date(record.last_used_at).getTime();
       if (!Number.isNaN(lastUsedMs) && lastUsedMs >= codeWindowStartMs) {
         logger.warn(`[TOTPService] TOTP replay rejected for user ${userId}`);
+        await this.recordFailed2FAAttempt(userId, MAX_2FA_ATTEMPTS, ATTEMPT_WINDOW_MINUTES);
         return false;
       }
     }
 
-    // Record this successful use to block subsequent replays.
+    // Record this successful use to block subsequent replays and reset 2FA attempt counter.
     await db.prepare(
       'UPDATE user_totp SET last_used_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).run(userId);
+    await db.prepare(
+      'UPDATE users SET totp_failed_attempts = 0, totp_locked_until = NULL WHERE id = ?'
     ).run(userId);
 
     logger.info(`[TOTPService] TOTP verified successfully for user ${userId}`);
@@ -257,7 +277,8 @@ export class TOTPServiceImpl implements TOTPService {
       throw new NotFoundError('User not found');
     }
 
-    if (!bcrypt.compareSync(password, user.password)) {
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
       throw new AuthError('Incorrect password');
     }
 
@@ -341,6 +362,31 @@ export class TOTPServiceImpl implements TOTPService {
     }
 
     return record.is_enabled === true || record.is_enabled === 1;
+  }
+
+  /**
+   * Records a failed 2FA attempt and locks the user's 2FA if the threshold is reached.
+   */
+  private async recordFailed2FAAttempt(userId: string, maxAttempts: number, windowMinutes: number): Promise<void> {
+    try {
+      await db.prepare(
+        'UPDATE users SET totp_failed_attempts = COALESCE(totp_failed_attempts, 0) + 1 WHERE id = ?'
+      ).run(userId);
+
+      const updated = await db.prepare(
+        'SELECT totp_failed_attempts FROM users WHERE id = ?'
+      ).get(userId) as any;
+
+      if (updated && updated.totp_failed_attempts >= maxAttempts) {
+        const lockUntil = new Date(Date.now() + windowMinutes * 60 * 1000).toISOString();
+        await db.prepare(
+          'UPDATE users SET totp_locked_until = ?::timestamp WHERE id = ?'
+        ).run(lockUntil, userId);
+        logger.warn(`[TOTPService] 2FA locked for user ${userId} after ${maxAttempts} failed attempts`);
+      }
+    } catch (e) {
+      logger.error(`[TOTPService] Failed to record 2FA attempt for user ${userId}:`, e);
+    }
   }
 }
 

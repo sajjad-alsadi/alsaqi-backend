@@ -274,10 +274,13 @@ describe('Property 1: Bug Condition exploration — compliance matrix consistenc
   // ── 1.3 Duplicate route (Req 2.3) ───────────────────────────────────────────
   // isBugCondition: X.route = '/api/compliance-items'
   // Property 3: singleCanonicalRoute(compliance_items)
-  it('1.3 compliance-items is excluded from generic CRUD routes (single canonical route)', () => {
-    // Expected (correct): the generic /api/compliance-items route is not generated,
-    // leaving /api/v1/compliance as the sole canonical write path.
-    expect(CRUD_EXCLUDED_ROUTES).toContain('compliance-items');
+  it('1.3 compliance-items is removed from generic CRUD routes (single canonical route)', () => {
+    // Expected (correct): the generateRoutes call for compliance-items was
+    // removed entirely from crudGenerator.ts, leaving /api/v1/compliance as
+    // the sole canonical write path. CRUD_EXCLUDED_ROUTES is now empty since
+    // dead calls were removed rather than just excluded.
+    expect(CRUD_EXCLUDED_ROUTES).not.toContain('compliance-items');
+    expect(CRUD_EXCLUDED_ROUTES).toHaveLength(0);
   });
 
   // ── 1.5 Unprotected read (Req 2.5) ──────────────────────────────────────────

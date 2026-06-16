@@ -128,10 +128,10 @@ describe('Property 1: Bug Condition exploration — routes (user-management-fixe
       return undefined;
     });
     const app = buildUserApp(db);
-    const res = await request(app).post('/users/sole-admin/suspend').send({});
+    const res = await request(app).post('/users/00000000-0000-4000-8000-000000000001/suspend').send({});
     // Expected (correct): reactivating the sole suspended admin (Suspended -> Active) is allowed.
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('Active');
+    expect(res.body.data.status).toBe('Active');
   });
 });
 

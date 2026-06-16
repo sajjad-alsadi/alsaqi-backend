@@ -148,18 +148,16 @@ async function issueFullTokens(userId: string, jwtPrivateKey: string, req: any, 
 
 export const createTwoFactorRoutes = (
   db: any,
-  JWT_SECRET: string,
+  // RS256 PUBLIC key used to verify the short-lived temp tokens (signed with the
+  // RSA private key during login). This MUST be the RSA public key — verifying an
+  // RS256 signature with the symmetric jwtSecret always fails and breaks 2FA login.
+  JWT_PUBLIC_KEY: string,
   JWT_PRIVATE_KEY: string,
   authLimiter: any,
   authenticate: any,
   logError: any
 ) => {
   const router = express.Router();
-
-  // We need the public key for verifying temp tokens
-  // The authenticate middleware uses JWT_PUBLIC_KEY internally, but we need it here too
-  // JWT_SECRET is actually the public key passed from the auth routes index
-  const JWT_PUBLIC_KEY = JWT_SECRET;
 
   // ─── POST /2fa/setup ─────────────────────────────────────────────────────
   // Requires authentication. Generates TOTP secret, QR code, and backup codes.
@@ -227,13 +225,27 @@ export const createTwoFactorRoutes = (
   // Does NOT require full auth. Uses the `2fa_setup_pending` tempToken issued by the login
   // route when an account is forced to enroll in 2FA before any session is granted.
   // Generates the TOTP secret, QR code, and backup codes for the pending user.
-  router.post('/2fa/setup-pending', validateBody(setupPendingSchema), asyncHandler(async (req: any, res) => {
+  // `authLimiter` prevents repeated calls that would regenerate secrets or burn entropy (Req 2.9).
+  router.post('/2fa/setup-pending', authLimiter, validateBody(setupPendingSchema), asyncHandler(async (req: any, res) => {
     const { tempToken } = req.body;
 
     // Verify the setup-pending temp token (rejects any other token type)
-    const { userId } = verifyTempToken(tempToken, JWT_PUBLIC_KEY, '2fa_setup_pending');
+    const { userId, username } = verifyTempToken(tempToken, JWT_PUBLIC_KEY, '2fa_setup_pending');
+
+    // If a pending (not yet enabled) secret already exists, return 409 to prevent
+    // silent overwrites that would invalidate a QR code the user already scanned.
+    const existing = await db.prepare(
+      'SELECT is_enabled FROM user_totp WHERE user_id = ?'
+    ).get(userId) as any;
+
+    if (existing && !existing.is_enabled && existing.is_enabled !== 1) {
+      logger.warn(`[2FA] Duplicate setup-pending request for user ${userId}; existing pending secret preserved`);
+      return res.status(409).json({ error: '2FA setup already in progress. Complete or retry enrollment.' });
+    }
 
     const result = await totpService.setup(userId);
+
+    await AuthService.logAudit(username, '2FA Setup Requested', 'Security', 'User initiated forced 2FA enrollment');
 
     res.json({
       secret: result.secret,
@@ -246,7 +258,8 @@ export const createTwoFactorRoutes = (
   // Does NOT require full auth. Uses the `2fa_setup_pending` tempToken. Confirms enrollment by
   // verifying the first TOTP code, enables 2FA, clears the forced-enrollment flag, and issues
   // full access/refresh tokens (completing the login).
-  router.post('/2fa/setup-complete', validateBody(setupCompleteSchema), asyncHandler(async (req: any, res) => {
+  // `authLimiter` prevents brute-force of the 6-digit TOTP code during enrollment (Req 2.9).
+  router.post('/2fa/setup-complete', authLimiter, validateBody(setupCompleteSchema), asyncHandler(async (req: any, res) => {
     const { tempToken, token } = req.body;
 
     // Verify the setup-pending temp token (rejects any other token type)

@@ -118,7 +118,7 @@ export class AuthService {
             if (daysSinceChange >= expiryDays) {
               requiresPasswordChange = true;
               // Mark in DB so middleware also blocks
-              await db.prepare("UPDATE users SET requires_password_change = 1 WHERE id = ?::uuid").run(user.id);
+              await db.prepare("UPDATE users SET requires_password_change = TRUE WHERE id = ?::uuid").run(user.id);
             }
           }
         } catch (e) {
@@ -174,24 +174,8 @@ export class AuthService {
       // explicit user denies (is_allowed = 0). The trailing EXCEPT clause subtracts the
       // denies so an explicit deny overrides a grant, matching the canonical resolution
       // semantics in PermissionService.resolvePermission (finding 1.28).
-      let permissions: Array<{ module: string; action: string }> = [];
-      try {
-        permissions = await db.prepare(`
-          SELECT p.module, p.action FROM permissions p
-          JOIN role_permissions rp ON p.id = rp.permission_id
-          WHERE rp.role_id = (SELECT role_id FROM users WHERE id = ?::uuid)
-          UNION
-          SELECT p.module, p.action FROM permissions p
-          JOIN user_permissions up ON p.id = up.permission_id
-          WHERE up.user_id = ?::uuid AND up.is_allowed = 1
-          EXCEPT
-          SELECT p.module, p.action FROM permissions p
-          JOIN user_permissions up ON p.id = up.permission_id
-          WHERE up.user_id = ?::uuid AND up.is_allowed = 0
-        `).all(user.id, user.id, user.id) as Array<{ module: string; action: string }>;
-      } catch (e) {
-        console.error("[AuthService] Failed to fetch permissions during login:", e);
-      }
+      const { PermissionService } = await import('./PermissionService.js');
+      const permissions = await PermissionService.getEffectivePermissions(user.id);
 
       return {
         user: {
@@ -270,22 +254,12 @@ export class AuthService {
   private static async notifyAdminsOfLockout(user: any, ipAddress?: string): Promise<void> {
     try {
       await db.transaction(async () => {
-        const admins = await db.prepare(
-          "SELECT id FROM users WHERE role = ?::text AND status = 'Active'"
-        ).all(UserRole.ADMIN) as Array<{ id: string }>;
-
-        for (const admin of admins) {
-          await db.prepare(
-            "INSERT INTO notifications (user_id, event_type, description, related_module, link, status, actor_id, entity_type) VALUES (?::uuid, ?::text, ?::text, ?::text, ?::text, 'Unread', ?::uuid, 'user')"
-          ).run(
-            admin.id,
-            'account_locked',
-            `Account "${user.username}" locked after ${user.failed_attempts + 1} failed login attempts (IP: ${ipAddress || 'Unknown'})`,
-            'Security',
-            '/users',
-            user.id
-          );
-        }
+        const description = `Account "${user.username}" locked after ${user.failed_attempts + 1} failed login attempts (IP: ${ipAddress || 'Unknown'})`;
+        await db.prepare(`
+          INSERT INTO notifications (user_id, event_type, description, related_module, link, status, actor_id, entity_type)
+          SELECT id, 'account_locked'::text, ?::text, 'Security'::text, '/users'::text, 'Unread', ?::uuid, 'user'
+          FROM users WHERE role = ?::text AND status = 'Active'
+        `).run(description, user.id, UserRole.ADMIN);
       });
     } catch (notifErr) {
       // Persisting one or more notification rows failed: the transaction above rolled back ALL

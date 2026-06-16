@@ -8,11 +8,14 @@
  * Dependencies (db, middleware, services) are injected via the V1RouterDeps interface.
  */
 
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { ApiServerConfig } from '../../index.js';
+import type { IDBWrapper } from '../../db/index.js';
+import type { PermissionAction } from '../../permissions/types.js';
+import type { UploadedFile } from 'express-fileupload';
 
 // Route factory imports
 import { createAuthRoutes } from '../auth/index.js';
@@ -50,11 +53,15 @@ import { createArchiveRoutes } from '../archive.js';
 import { createLookupRoutes } from '../lookups.js';
 import { createReportsRoutes } from '../reports.js';
 import type { ReportQueueService, ReportStorageService } from '../reports.js';
+import { createWebVitalsRoutes } from '../webVitals.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ExpressMiddleware = (req: any, res: Response, next: NextFunction) => any;
 
 /**
  * Dependencies required to create the v1 router.
@@ -62,15 +69,29 @@ const __dirname = path.dirname(__filename);
  * once services and middleware are initialized (task 3.4).
  */
 export interface V1RouterDeps {
-  db: any;
-  authenticate: any;
-  authorize: any;
-  checkPermission: any;
-  authLimiter: any;
-  createNotification: any;
-  createCrudRoutes: any;
-  saveFile: any;
-  logError: any;
+  db: IDBWrapper;
+  authenticate: ExpressMiddleware;
+  authorize: (allowedRoles: readonly string[]) => ExpressMiddleware;
+  checkPermission: (module: string, action: PermissionAction) => ExpressMiddleware;
+  authLimiter: ExpressMiddleware;
+  createNotification: (
+    recipientIds: string | string[] | 'all',
+    type: string,
+    message: string,
+    module: string,
+    link: string,
+    options?: Record<string, unknown>
+  ) => Promise<boolean>;
+  createCrudRoutes: (
+    db: IDBWrapper,
+    authenticate: ExpressMiddleware,
+    checkPermission: (module: string, action: PermissionAction) => ExpressMiddleware,
+    logError: (err: unknown, module?: string) => Promise<void>,
+    createNotification: V1RouterDeps['createNotification'],
+    saveFile: V1RouterDeps['saveFile']
+  ) => express.Router;
+  saveFile: (file: UploadedFile) => Promise<string>;
+  logError: (err: unknown, module?: string) => Promise<void>;
   config: ApiServerConfig;
   idempotencyMiddleware: express.RequestHandler;
   /** Optional: QueueService for report generation (from infrastructure) */
@@ -123,11 +144,18 @@ export function createV1Router(deps: V1RouterDeps): express.Router {
   });
 
   // Auth Routes
+  // NOTE: The second positional argument is consumed inside the auth routes as the
+  // RS256 verification key (e.g. twoFactor.ts verifies short-lived temp tokens, and
+  // SessionService.refresh verifies refresh tokens). Tokens are SIGNED with the RSA
+  // private key, so they MUST be verified with the RSA PUBLIC key — never the symmetric
+  // `jwtSecret`. Passing `jwtSecret` here previously broke all RS256 verification
+  // (the entire 2FA login flow), since an RS256 signature cannot be verified with a
+  // symmetric secret string.
   v1Router.use(
     '/auth',
     createAuthRoutes(
       db,
-      config.jwtSecret,
+      config.jwtPublicKey,
       config.jwtPrivateKey,
       authLimiter,
       authenticate,
@@ -195,6 +223,9 @@ export function createV1Router(deps: V1RouterDeps): express.Router {
 
   // Report Generation Routes (PDF report generation and status tracking)
   v1Router.use('/reports', createReportsRoutes(db, authenticate, checkPermission, logError, queueService, storageService));
+
+  // Web Vitals Metrics (unauthenticated — frontend reports before/during login)
+  v1Router.use('/metrics', createWebVitalsRoutes());
 
   return v1Router;
 }

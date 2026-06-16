@@ -88,7 +88,7 @@ describe('Property 11: Preservation — user routes (user-management-fixes)', ()
         const res = await request(app).post(`/users/${targetId}/suspend`).send({});
 
         expect(res.status).toBe(200);
-        expect(res.body.status).toBe('Suspended');
+        expect(res.body.data.status).toBe('Suspended');
         expect(userServiceMock.setStatus).toHaveBeenCalledWith(targetId, 'Suspended');
         expect(authServiceMock.logAudit).toHaveBeenCalled();
       }),

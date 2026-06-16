@@ -14,17 +14,12 @@ import path from 'path';
 /**
  * Route names excluded from CRUD generation because they have custom route files.
  * These resources are handled by dedicated route modules with specialized logic.
+ * 
+ * Note: audit-tasks, audit-programs, recommendations, audit-findings, and
+ * compliance-items were removed entirely (calls + table entries) since their
+ * custom route modules fully replace the CRUD generator for those resources.
  */
-export const CRUD_EXCLUDED_ROUTES: string[] = [
-  'audit-tasks',
-  'audit-programs',
-  'recommendations',
-  'audit-findings',
-  // compliance-items is served exclusively by the canonical custom route
-  // /api/v1/compliance (createComplianceRoutes); excluding it here prevents the
-  // generic generateRoutes call from registering a duplicate /api/compliance-items route.
-  'compliance-items',
-];
+export const CRUD_EXCLUDED_ROUTES: string[] = [];
 
 export const createCrudRoutes = (
   db: any,
@@ -37,25 +32,20 @@ export const createCrudRoutes = (
   const router = express.Router();
 
   const ALLOWED_TABLES = [
-    "audit_plans", "audit_tasks", "audit_programs", "audit_procedures", 
+    "audit_plans", "audit_procedures", 
     "audit_evidence", "risk_register", "fraud_log", "central_bank_instructions", 
-    "law_bank", "audit_reports", "audit_findings", "recommendations", "compliance_items"
+    "law_bank", "audit_reports"
   ];
 
   const TABLE_ALLOWED_FIELDS: Record<string, string[]> = {
     "audit_plans": ["plan_code", "program_id", "title", "department", "type", "risk_rating", "planned_start_date", "planned_end_date", "status", "lead_auditor", "team_members", "objectives", "scope", "notes", "year", "quarter"],
-    "audit_tasks": ["task_number", "title", "plan_id", "program_id", "audit_type", "task_type", "status", "assigned_to", "audited_unit_id", "planned_hours", "actual_hours", "period_from", "period_to", "due_date", "approved_by", "approved_at", "created_by", "deleted_at"],
-    "audit_programs": ["program_code", "program_title", "audit_area", "department", "audit_type", "audit_objective", "audit_scope", "key_risks", "control_objectives", "reference_standard", "status", "version_number", "created_by"],
     "audit_procedures": ["program_id", "procedure_number", "audit_step", "audit_test_description", "risk_addressed", "control_test_type", "expected_evidence", "sampling_method", "responsible_auditor", "remarks"],
     "audit_evidence": ["audit_id", "finding_id", "type", "description", "uploaded_by", "file_name", "file_data", "upload_date"],
     "risk_register": ["risk_id", "description", "owner", "source", "early_warning", "type", "likelihood", "impact", "likelihood_num", "impact_num", "risk_score_calc", "risk_level_calc", "score", "rating", "controls", "control_assessment", "mitigation", "treatment_option", "residual_likelihood", "residual_impact", "residual_score", "residual_rating", "status", "target_date", "review_date", "notes", "entry_date", "entered_by"],
     "fraud_log": ["incident_date", "description", "reported_by", "status"],
     "central_bank_instructions": ["title", "issue_date", "reference_number", "category", "description", "related_department", "attachment", "status", "related_instruction_id"],
     "law_bank": ["title", "type", "authority", "issue_date", "keywords", "bookmarked", "file_url"],
-    "audit_reports": ["audit_id", "title", "report_type", "generated_by", "date_generated", "status", "content"],
-    "audit_findings": ["audit_id", "title", "description", "criteria", "condition", "cause", "consequence", "recommendation", "risk_level", "status", "finding_number", "finding_type", "impact", "root_cause", "responsible_unit_id", "risk_id", "created_by", "deleted_at"],
-    "recommendations": ["finding_id", "department", "responsible", "due_date", "status", "risk_level", "rec_number", "action_plan", "responsible_person_id", "priority", "follow_up_date", "closure_evidence_path", "closed_by", "closed_at", "created_by"],
-    "compliance_items": ["ref_number", "title", "type", "issuing_authority", "issue_date", "effective_date", "compliance_status", "responsible_person_id", "attachment_path", "notes", "created_by"]
+    "audit_reports": ["audit_id", "title", "report_type", "generated_by", "date_generated", "status", "content"]
   };
 
   const generateRoutes = (tableName: string, routeName: string, moduleName: string) => {
@@ -271,8 +261,6 @@ export const createCrudRoutes = (
   };
 
   generateRoutes("audit_plans", "audit-plans", "AuditPlans");
-  generateRoutes("audit_tasks", "audit-tasks", "AuditTasks");
-  generateRoutes("audit_programs", "audit-programs", "AuditProgramLibrary");
   generateRoutes("audit_procedures", "audit-procedures", "AuditProgramLibrary");
   generateRoutes("audit_evidence", "audit-evidence", "AuditEvidence");
   generateRoutes("risk_register", "risk-register", "RiskRegister");
@@ -280,9 +268,6 @@ export const createCrudRoutes = (
   generateRoutes("central_bank_instructions", "central-bank-instructions", "Policies");
   generateRoutes("law_bank", "law-bank", "Policies");
   generateRoutes("audit_reports", "audit-reports", "Reports");
-  generateRoutes("audit_findings", "audit-findings", "AuditFindings");
-  generateRoutes("recommendations", "recommendations", "Recommendations");
-  generateRoutes("compliance_items", "compliance-items", "ComplianceMatrix");
 
   return router;
 };

@@ -1305,17 +1305,42 @@ export const runMigrations = async () => {
       console.log(`[SEED] Admin Role ID: ${roleId}`);
 
       await db.prepare(`
-        INSERT INTO users (username, password, name, role, role_id, department, status, created_at) 
-        VALUES ('admin', ?, 'System Administrator', 'Admin', ?, 'Management', 'Active', CURRENT_TIMESTAMP)
+        INSERT INTO users (
+          username, password, name, email, phone_number, employee_id,
+          role, role_id, department, unit, job_title_id,
+          language, theme, dashboard_layout, notifications_enabled,
+          status, session_version, requires_password_change, created_at
+        )
+        VALUES (
+          'admin', ?, 'مدير النظام', 'admin@alsaqi.local', '+966500000001', 'EMP-0001',
+          'Admin', ?, 'الإدارة العامة', 'تقنية المعلومات', NULL,
+          'ar', 'light', 'standard', 1,
+          'Active', 1, 0, CURRENT_TIMESTAMP
+        )
       `).run(hashedPassword, roleId);
       console.log("[SEED] Default admin user seeded.");
     } else {
-      console.log("[SEED] Admin user already exists. Checking role_id...");
-      // Update role_id if missing or incorrect
+      console.log("[SEED] Admin user already exists. Checking role_id and filling missing fields...");
       const adminRole = await db.prepare("SELECT id FROM roles WHERE name = ?").get(ROLES.ADMIN) as any;
       if (adminRole && adminRole.id) {
         console.log(`[SEED] Found Admin Role ID: ${adminRole.id}. Updating admin user...`);
-        const result = await db.prepare("UPDATE users SET role_id = ? WHERE username = 'admin' AND (role_id IS NULL OR role_id != ?)").run(adminRole.id, adminRole.id);
+        const result = await db.prepare(`
+          UPDATE users SET
+            role_id = ?,
+            email = COALESCE(NULLIF(email, ''), 'admin@alsaqi.local'),
+            phone_number = COALESCE(NULLIF(phone_number, ''), '+966500000001'),
+            employee_id = COALESCE(NULLIF(employee_id, ''), 'EMP-0001'),
+            name = COALESCE(NULLIF(name, ''), 'مدير النظام'),
+            department = COALESCE(NULLIF(department, ''), 'الإدارة العامة'),
+            unit = COALESCE(NULLIF(unit, ''), 'تقنية المعلومات'),
+            language = COALESCE(NULLIF(language, ''), 'ar'),
+            theme = COALESCE(NULLIF(theme, ''), 'light'),
+            dashboard_layout = COALESCE(NULLIF(dashboard_layout, ''), 'standard'),
+            notifications_enabled = COALESCE(notifications_enabled, 1),
+            session_version = COALESCE(session_version, 1),
+            requires_password_change = COALESCE(requires_password_change, 0)
+          WHERE username = 'admin'
+        `).run(adminRole.id);
         console.log(`[SEED] Admin update rows: ${result.changes}`);
       }
     }
@@ -1940,6 +1965,18 @@ export const versionedMigrations: Migration[] = [
 
       // Add task_type column to distinguish between routine and audit plan tasks
       await db.exec(`ALTER TABLE audit_tasks ADD COLUMN IF NOT EXISTS task_type VARCHAR(20) DEFAULT 'audit_plan'`);
+    },
+  },
+
+  {
+    version: '011',
+    name: 'Add per-user 2FA brute-force lockout columns',
+    type: 'schema',
+    up: async () => {
+      // Track failed 2FA attempts per user to prevent brute-force attacks on TOTP codes.
+      // After N failed attempts the account's 2FA is locked until totp_locked_until.
+      await db.exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_failed_attempts INTEGER DEFAULT 0`);
+      await db.exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_locked_until TIMESTAMP`);
     },
   },
 ];

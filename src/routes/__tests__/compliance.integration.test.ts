@@ -472,12 +472,14 @@ describe('Compliance Integration Tests', () => {
   // ─── Canonical route uniqueness ──────────────────────────────────────────
 
   describe('Canonical route uniqueness', () => {
-    it('should exclude the generic compliance-items route so /api/v1/compliance is the single canonical route', () => {
-      // The duplicate /api/compliance-items route was eliminated by adding
-      // 'compliance-items' to CRUD_EXCLUDED_ROUTES; generateRoutes() therefore
-      // skips registering the generic route, leaving the dedicated
+    it('should not generate a generic compliance-items route so /api/v1/compliance is the single canonical route', () => {
+      // The generateRoutes call for compliance-items was removed entirely
+      // from crudGenerator.ts (along with its ALLOWED_TABLES and
+      // TABLE_ALLOWED_FIELDS entries), leaving the dedicated
       // createComplianceRoutes (/api/v1/compliance) as the only write path.
-      expect(CRUD_EXCLUDED_ROUTES).toContain('compliance-items');
+      // CRUD_EXCLUDED_ROUTES is now empty since the dead calls were removed.
+      expect(CRUD_EXCLUDED_ROUTES).not.toContain('compliance-items');
+      expect(CRUD_EXCLUDED_ROUTES).toHaveLength(0);
     });
   });
 });

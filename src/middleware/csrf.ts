@@ -75,7 +75,7 @@ export function csrfMiddleware(options: CsrfOptions): RequestHandler {
     // on a path prefix (e.g. app.use('/api', ...)), req.path is relative
     // to the mount point (e.g. '/auth/login' instead of '/api/auth/login').
     const requestPath = req.originalUrl.split('?')[0]; // strip query params
-    if (exemptPaths.some(path => requestPath === path || requestPath.startsWith(path + '/'))) {
+    if (exemptPaths.some(path => requestPath === path)) {
       next();
       return;
     }
