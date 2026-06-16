@@ -183,6 +183,9 @@ export class AuthService {
           username: user.username,
           role: user.role,
           name: user.name,
+          email: user.email,
+          department: user.department,
+          status: user.status,
           requires_password_change: requiresPasswordChange,
           requires_2fa_setup: requires2faSetup,
           permissions
