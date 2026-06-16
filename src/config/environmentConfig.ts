@@ -185,6 +185,24 @@ export function getFileSignedUrlMaxTtlS(env?: EnvSource): number {
   return readIntInRange(defaultEnv(env).FILE_SIGNED_URL_MAX_TTL_S, CONFIG_RANGES.FILE_SIGNED_URL_MAX_TTL_S);
 }
 
+/**
+ * Symmetric key used to encrypt files at rest, or `undefined` when
+ * unset/whitespace-only. No default; presence is asserted at startup so files
+ * are never written plaintext due to a missing key (Req 2.11).
+ */
+export function getFileEncryptionKey(env?: EnvSource): string | undefined {
+  return readNonEmptyString(defaultEnv(env).FILE_ENCRYPTION_KEY);
+}
+
+/**
+ * Symmetric key used to encrypt persisted TOTP secrets, or `undefined` when
+ * unset/whitespace-only. No default; presence is asserted at startup alongside
+ * {@link getFileEncryptionKey} (Req 2.11).
+ */
+export function getTotpEncryptionKey(env?: EnvSource): string | undefined {
+  return readNonEmptyString(defaultEnv(env).TOTP_ENCRYPTION_KEY);
+}
+
 /** Streaming threshold in bytes (1024..1073741824, default 1048576). Req 12.3. */
 export function getFileStreamThresholdBytes(env?: EnvSource): number {
   return readIntInRange(defaultEnv(env).FILE_STREAM_THRESHOLD_BYTES, CONFIG_RANGES.FILE_STREAM_THRESHOLD_BYTES);

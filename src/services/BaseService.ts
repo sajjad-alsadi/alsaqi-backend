@@ -2,7 +2,7 @@ import { db } from '../db/index';
 import { NotFoundError, ValidationError } from '../utils/errors';
 import { AppCodeGenerator } from '../utils/AppCodeGenerator';
 import { enqueueEvent } from './transactionalEvents';
-import { computePaginationMeta } from '../utils/paginationService';
+import { computePaginationMeta, DEFAULT_PAGE_SIZE } from '../utils/paginationService';
 import { checkWhitelist } from './columnWhitelist';
 import { buildSearchClause } from './searchColumns';
 import { isKeysetTable, keysetPaginate, clampKeysetPageSize } from '../utils/cursorPagination';
@@ -31,7 +31,11 @@ export class BaseService {
     'audit_reports',
     'fraud_log',
     'incoming_correspondence',
-    'outgoing_correspondence',
+    // The real outgoing-correspondence table is `outgoing_letters` (finding
+    // 1.32 → 2.32). The previous `outgoing_correspondence` entry referenced a
+    // legacy/unused table, so the soft-delete path never applied to the table the
+    // application actually writes to.
+    'outgoing_letters',
     'correspondence_attachments',
   ]);
 
@@ -46,16 +50,18 @@ export class BaseService {
    * the duplicated inline hash-chain writer that previously lived here has been
    * removed so exactly one audit-append implementation remains.
    *
-   * The previous behavior of this method was to swallow write failures and log
-   * them rather than propagate, so callers (audit logging is a side effect of a
-   * primary operation) are never crashed by an audit-write failure. That
-   * non-crashing behavior is preserved here.
+   * Append failures are now SURFACED (re-thrown) rather than swallowed
+   * (Requirement 2.5): a failing append leaves a gap in the tamper-evident
+   * chain, so the failure must propagate to the caller and be detectable rather
+   * than silently logged and dropped. On the happy path the append succeeds and
+   * nothing is thrown, so well-behaved primary operations are unaffected.
    */
   static async logAudit(username: string, action: string, module: string, details: string) {
     try {
       await AuditChainService.append({ user: username, action, module, details });
     } catch (error) {
       console.error("[System Log Error] Failed to insert audit trail:", error);
+      throw error;
     }
   }
 
@@ -165,7 +171,7 @@ export class BaseService {
     }
     const safeOrderBy = `${orderColumn} ${orderDirection}`;
 
-    const effectiveOffsetPageSize = pageSize ?? 10;
+    const effectiveOffsetPageSize = pageSize ?? DEFAULT_PAGE_SIZE;
     const offset = (page - 1) * effectiveOffsetPageSize;
 
     const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM ${validatedTable} ${whereClause}`).get(...whereValues);

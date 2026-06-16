@@ -180,9 +180,9 @@ describe('BulkOperationsService', () => {
     it('should process bulk create successfully', async () => {
       const items = [{ title: 'Plan A' }, { title: 'Plan B' }];
 
-      // Each create: INSERT RETURNING
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 1, changes: 1 });
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 2, changes: 1 });
+      // Each create reads its new id via INSERT ... RETURNING id through get() (portable)
+      mockGet.mockResolvedValueOnce({ id: 1 });
+      mockGet.mockResolvedValueOnce({ id: 2 });
       // Audit: get previous hash
       mockGet.mockResolvedValueOnce({ hash: 'prev-hash' });
       // Audit: insert
@@ -270,10 +270,10 @@ describe('BulkOperationsService', () => {
     it('should rollback entire transaction on processing failure', async () => {
       const items = [{ title: 'Plan A' }, { title: 'Plan B' }];
 
-      // First create succeeds
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 1, changes: 1 });
+      // First create succeeds (reads its id via RETURNING id → get())
+      mockGet.mockResolvedValueOnce({ id: 1 });
       // Second create fails
-      mockRun.mockRejectedValueOnce(new Error('DB constraint violation'));
+      mockGet.mockRejectedValueOnce(new Error('DB constraint violation'));
 
       await expect(
         BulkOperationsService.execute('audit-plans', 'create', items, 'admin')
@@ -294,7 +294,8 @@ describe('BulkOperationsService', () => {
     it('should record a single audit log entry for the bulk operation', async () => {
       const items = [{ title: 'Plan A' }];
 
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 1, changes: 1 });
+      // Create reads its id via RETURNING id → get()
+      mockGet.mockResolvedValueOnce({ id: 1 });
       // Audit: get previous hash
       mockGet.mockResolvedValueOnce({ hash: 'prev-hash' });
       // Audit: insert
@@ -312,9 +313,10 @@ describe('BulkOperationsService', () => {
     it('should return correct response structure', async () => {
       const items = [{ title: 'Plan A' }, { title: 'Plan B' }, { title: 'Plan C' }];
 
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 10, changes: 1 });
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 11, changes: 1 });
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 12, changes: 1 });
+      // Each create reads its id via RETURNING id → get()
+      mockGet.mockResolvedValueOnce({ id: 10 });
+      mockGet.mockResolvedValueOnce({ id: 11 });
+      mockGet.mockResolvedValueOnce({ id: 12 });
       // Audit
       mockGet.mockResolvedValueOnce({ hash: 'prev-hash' });
       mockRun.mockResolvedValueOnce({ lastInsertRowid: 1, changes: 1 });

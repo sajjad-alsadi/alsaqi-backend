@@ -41,7 +41,9 @@ interface TransactionEventBuffer {
 /**
  * The maximum time, in milliseconds, allowed to dispatch all buffered events
  * for a committed transaction (Req 20.2). Dispatch is initiated immediately on
- * commit; this bound documents the dispatch deadline.
+ * commit and is bounded by this deadline in {@link flushOnCommit}: a single
+ * dispatch is capped at the remaining budget and, once the deadline elapses,
+ * any not-yet-dispatched events are abandoned.
  */
 export const FLUSH_DEADLINE_MS = 5000;
 
@@ -130,14 +132,39 @@ export async function flushOnCommit(): Promise<void> {
   }
   // Drain the buffer up front so it is released regardless of dispatch outcome.
   const pending = store.events.splice(0, store.events.length);
+  // Bound the total dispatch time to FLUSH_DEADLINE_MS (Req 20.2). Once the
+  // deadline is reached, remaining events are abandoned rather than allowed to
+  // hold the committed transaction's caller indefinitely; an individual slow
+  // dispatch is likewise capped at the remaining budget.
+  const deadline = Date.now() + FLUSH_DEADLINE_MS;
   for (const event of pending) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      // Deadline exhausted: stop dispatching the remainder.
+      break;
+    }
     try {
-      await dispatcher(event.name, event.payload);
+      await withDeadline(dispatcher(event.name, event.payload), remaining);
     } catch {
-      // Swallow: a failed external dispatch must not roll back a committed
-      // transaction (Req 20.4). Retry/failure recording lives in the dispatcher.
+      // Swallow: a failed or timed-out external dispatch must not roll back a
+      // committed transaction (Req 20.4). Retry/failure recording lives in the
+      // dispatcher.
     }
   }
+}
+
+/**
+ * Resolves with `promise`, or rejects once `ms` milliseconds elapse, whichever
+ * happens first. Used to bound a single event dispatch to the remaining flush
+ * budget (Req 20.2). The timer is always cleared so it cannot keep the event
+ * loop alive after the race settles.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("flush deadline exceeded")), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 /**

@@ -25,8 +25,13 @@ FROM node:20-slim AS production
 
 WORKDIR /app
 
-# Install Chromium dependencies required by Puppeteer
+# Install the system Chromium browser plus the shared libraries required by
+# Puppeteer. We rely on the distro Chromium (reachable at /usr/bin/chromium by
+# any user, including the non-root runtime UID 1001) instead of Puppeteer's
+# downloaded build, since PUPPETEER_SKIP_DOWNLOAD=true means no browser is
+# fetched into root's cache (Finding 1.23 → 2.23).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -82,7 +87,12 @@ RUN groupadd -g 1001 appuser && \
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV UPLOAD_DIR=/app/uploads
+# Use the system Chromium (installed above) rather than a Puppeteer-downloaded
+# build. PUPPETEER_SKIP_DOWNLOAD avoids fetching a browser at install time, and
+# PUPPETEER_EXECUTABLE_PATH points Puppeteer at the reachable binary so in-container
+# PDF generation works under the non-root runtime user (Finding 1.23 → 2.23).
 ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expose the API port
 EXPOSE 3000

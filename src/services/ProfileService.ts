@@ -1,5 +1,6 @@
 import { db } from '../db/index';
 import { NotFoundError } from '../utils/errors';
+import { AuditChainService } from './AuditChainService';
 
 export class ProfileService {
   static async getProfile(userId: string | number) {
@@ -36,8 +37,12 @@ export class ProfileService {
     await db.prepare("UPDATE users SET name = ?, email = ?, department = ?, profile_picture = ? WHERE id = ?")
       .run(name, email, department, profile_picture, userId);
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, "Update Profile", "Settings", "User updated personal profile");
+    await AuditChainService.append({
+      user: username,
+      action: 'Update Profile',
+      module: 'Settings',
+      details: 'User updated personal profile',
+    });
       
     return true;
   }
@@ -47,8 +52,12 @@ export class ProfileService {
     await db.prepare("UPDATE users SET language = ?, dashboard_layout = ?, notifications_enabled = ?, theme = ? WHERE id = ?")
       .run(language, dashboard_layout, notifications_enabled ? 1 : 0, theme || 'light', userId);
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, "Update Preferences", "Settings", "User updated preferences");
+    await AuditChainService.append({
+      user: username,
+      action: 'Update Preferences',
+      module: 'Settings',
+      details: 'User updated preferences',
+    });
       
     return true;
   }

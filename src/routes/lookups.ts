@@ -25,7 +25,7 @@ export const createLookupRoutes = (
     asyncHandler(async (req, res) => {
       const risks = await db
         .prepare(
-          `SELECT id, risk_id, description FROM risk_register ORDER BY risk_id ASC`
+          `SELECT id, risk_id, description FROM risk_register WHERE deleted_at IS NULL ORDER BY risk_id ASC LIMIT 500`
         )
         .all();
 
@@ -51,7 +51,7 @@ export const createLookupRoutes = (
     asyncHandler(async (req, res) => {
       const items = await db
         .prepare(
-          `SELECT id, ref_number, title FROM compliance_items ORDER BY ref_number ASC`
+          `SELECT id, ref_number, title FROM compliance_items WHERE deleted_at IS NULL ORDER BY ref_number ASC LIMIT 500`
         )
         .all();
 

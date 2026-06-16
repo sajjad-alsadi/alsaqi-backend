@@ -23,12 +23,26 @@ interface EncryptedPayload {
   data: string; // AES-256-GCM ciphertext (base64)
 }
 
+// HKDF parameters for deriving the AES-256-GCM key from the encryption secret.
+// Mirrors the HKDF approach used by TOTPService; domain-separated via salt + info.
+const KEY_LENGTH = 32; // 256-bit AES key
+const HKDF_SALT = 'alsaqi-rsa-keystore-salt';
+const HKDF_INFO = 'alsaqi-rsa-keystore-encryption';
+
 /**
  * KeyStore provides encrypted persistence for RSA key pairs.
  *
  * Storage path: `${dataDir}/keys/.rsa_keys.enc`
- * Encryption: AES-256-GCM with key derived from SHA-256(JWT_SECRET + '_rsa_enc')
+ * Encryption: AES-256-GCM with a key derived from JWT_SECRET via HKDF-SHA256.
  * Fallback: If the configured dataDir is not writable, attempts './data' relative to app root.
+ *
+ * MIGRATION NOTE: the derivation was changed from `SHA-256(JWT_SECRET + '_rsa_enc')`
+ * to HKDF-SHA256 (finding 1.39). A `.rsa_keys.enc` written by the old derivation can no
+ * longer be decrypted; `load()` already treats a failed decryption as a corrupted file
+ * (it backs the file up and returns null), so `getOrCreate()` transparently regenerates a
+ * fresh RSA key pair on first boot after the upgrade. Regeneration rotates the signing
+ * keys, which invalidates outstanding JWT access/refresh tokens — existing sessions reset
+ * once after deployment. This is the same behavior as a JWT_SECRET change today.
  */
 export class KeyStore {
   private readonly dataDir: string;
@@ -41,10 +55,21 @@ export class KeyStore {
   }
 
   /**
-   * Derives a 256-bit encryption key from the JWT_SECRET.
+   * Derives a 256-bit encryption key from the JWT_SECRET using HKDF-SHA256.
+   *
+   * HKDF (RFC 5869) is a proper key-derivation function with domain separation via the
+   * salt/info parameters, replacing the previous plain `SHA-256(secret + '_rsa_enc')`
+   * concatenation (finding 1.39).
    */
   private deriveEncryptionKey(): Buffer {
-    return crypto.createHash('sha256').update(this.encryptionSecret + '_rsa_enc').digest();
+    const derived = crypto.hkdfSync(
+      'sha256',
+      Buffer.from(this.encryptionSecret, 'utf8'),
+      Buffer.from(HKDF_SALT, 'utf8'),
+      Buffer.from(HKDF_INFO, 'utf8'),
+      KEY_LENGTH
+    );
+    return Buffer.from(derived);
   }
 
   /**

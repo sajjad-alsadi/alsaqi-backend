@@ -5,8 +5,70 @@ import db from '../db/index';
 /**
  * In-memory set tracking idempotency keys currently being processed.
  * Used to detect and reject duplicate in-flight requests with 409 Conflict.
+ *
+ * NOTE: This in-flight dedup Set is PER-INSTANCE only. In a multi-instance /
+ * horizontally-scaled deployment, two concurrent requests with the same key
+ * may be routed to different instances and both pass the in-flight check.
+ * Cross-instance dedup is therefore BEST-EFFORT; the authoritative guarantee
+ * comes from the persisted idempotency_keys record (see IdempotencyService).
  */
 const inFlightKeys = new Set<string>();
+
+/**
+ * Sensitive field names that must never be persisted in plaintext in the
+ * idempotency cache. Response bodies are cached for the configured TTL
+ * (default 24h), so any secret captured here would otherwise sit at rest in
+ * the database. Keys are matched case-insensitively.
+ *
+ * Centralized so the redaction policy has a single source of truth.
+ */
+const SENSITIVE_KEYS = new Set<string>([
+  'temppassword',
+  'password',
+  'currentpassword',
+  'newpassword',
+  'token',
+  'accesstoken',
+  'refreshtoken',
+  'idtoken',
+  'secret',
+  'clientsecret',
+  'apikey',
+  'privatekey',
+  'totpsecret',
+  'mfasecret',
+  'backupcodes',
+  'recoverycodes',
+  'sessiontoken',
+  'authorization',
+]);
+
+const REDACTED_PLACEHOLDER = '[REDACTED]';
+
+/**
+ * Recursively redacts known sensitive fields from a response body before it is
+ * cached/replayed. Returns a redacted deep copy and never mutates the original
+ * object (so the live response sent to the caller is unaffected).
+ */
+export function redactSensitiveFields(value: any): any {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveFields(item));
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, any> = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+        result[key] = REDACTED_PLACEHOLDER;
+      } else {
+        result[key] = redactSensitiveFields(val);
+      }
+    }
+    return result;
+  }
+
+  return value;
+}
 
 /**
  * Builds a composite key scoping the idempotency key to the authenticated user.
@@ -147,6 +209,11 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}) {
       res.json = ((body: any): Response => {
         const statusCode = res.statusCode;
 
+        // Redact secrets (e.g. tempPassword, tokens) BEFORE persisting so they
+        // are never stored in plaintext in the idempotency cache for the TTL.
+        // The original `body` is sent to the caller unchanged.
+        const redactedBody = redactSensitiveFields(body);
+
         // Store the response asynchronously (fire-and-forget)
         IdempotencyService.store(
           idempotencyKey,
@@ -154,7 +221,7 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}) {
           method,
           requestPath,
           statusCode,
-          JSON.stringify(body),
+          JSON.stringify(redactedBody),
           ttl
         )
           .catch((err) => {

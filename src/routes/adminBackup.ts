@@ -29,10 +29,9 @@ export const createAdminBackupRoutes = (
       res.json(result);
     } catch (error: any) {
       logger.error('[ADMIN] Manual backup trigger failed:', error);
-      res.status(500).json({
-        error: 'Backup failed',
-        message: error.message || 'An unexpected error occurred during backup',
-      });
+      // Forward to the global error handler so the response is sanitized
+      // (never leak raw error.message).
+      throw error;
     }
   }));
 

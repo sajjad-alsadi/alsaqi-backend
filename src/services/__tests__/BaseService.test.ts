@@ -586,14 +586,17 @@ describe('BaseService', () => {
       expect(directInserts.length).toBe(0);
     });
 
-    it('should swallow append failures and not crash the caller', async () => {
-      mockAuditAppend.mockRejectedValueOnce(new Error('append failed'));
+    it('should surface (re-throw) append failures instead of swallowing them', async () => {
+      const appendError = new Error('append failed');
+      mockAuditAppend.mockRejectedValueOnce(appendError);
 
-      // The primary operation logging is a side effect; a write failure must not
-      // propagate out of BaseService.logAudit.
+      // A failed audit append leaves a gap in the tamper-evident hash chain, so
+      // the failure must propagate to the caller rather than being silently
+      // logged and dropped (Req 2.5). logAudit therefore rejects/propagates when
+      // AuditChainService.append rejects.
       await expect(
         BaseService.logAudit('admin', 'create', 'AuditPlan', 'First entry')
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow('append failed');
 
       expect(mockAuditAppend).toHaveBeenCalledTimes(1);
     });

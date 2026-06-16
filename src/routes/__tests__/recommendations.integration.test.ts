@@ -48,7 +48,9 @@ function createRecommendationTestApp(options?: {
 
   const logError = vi.fn();
 
-  const router = createRecommendationRoutes(mockDb, authenticate, logError);
+  const checkPermission = () => (_req: any, _res: any, next: any) => next();
+
+  const router = createRecommendationRoutes(mockDb, authenticate, checkPermission, logError);
   app.use('/api/recommendations', router);
   app.use(globalErrorHandler);
 

@@ -350,22 +350,21 @@ describe('Full Request Lifecycle Integration Tests', () => {
       expect(res.body.data).toBeNull();
       expect(res.body.error).toBeDefined();
 
-      // The validateBody middleware returns { success: false, error: { code, message, errors } }
-      // The response wrapper wraps this as the error field in the envelope.
-      // So the validation error details are nested inside res.body.error
+      // Canonical envelope (task 8.2 / finding 1.17): validation errors are NOT
+      // double-wrapped under error.error. The error object sits directly under
+      // res.body.error with the single canonical field-error shape under
+      // `error.details` as { path, message, code } (no `rule`).
       const errorPayload = res.body.error;
-      // The error payload contains the validation error structure
-      expect(errorPayload.error).toBeDefined();
-      expect(errorPayload.error.code).toBe('VALIDATION_ERROR');
-      expect(errorPayload.error.message).toBe('Validation failed');
-      expect(errorPayload.error.errors).toBeDefined();
-      expect(Array.isArray(errorPayload.error.errors)).toBe(true);
-      expect(errorPayload.error.errors.length).toBeGreaterThan(0);
+      expect(errorPayload.code).toBe('VALIDATION_ERROR');
+      expect(errorPayload.message).toBe('Validation failed');
+      expect(errorPayload.details).toBeDefined();
+      expect(Array.isArray(errorPayload.details)).toBe(true);
+      expect(errorPayload.details.length).toBeGreaterThan(0);
 
-      // Verify field-level error structure
-      const fieldError = errorPayload.error.errors[0];
-      expect(fieldError.field).toBe('title');
-      expect(fieldError.rule).toBeDefined();
+      // Verify the canonical field-level error structure { path, message, code }.
+      const fieldError = errorPayload.details[0];
+      expect(fieldError.path).toBe('title');
+      expect(fieldError.code).toBeDefined();
       expect(fieldError.message).toBeDefined();
     });
 

@@ -72,7 +72,12 @@ export class UserService {
     const total = await db.prepare("SELECT COUNT(*) as count FROM users").get() as any;
     const active = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Active'").get() as any;
     const suspended = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Suspended'").get() as any;
-    const archived = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Archived'").get() as any;
+    // Archived users persist as 'Inactive' (see STATUS_PERSIST_MAP / setStatus): the
+    // users.status CHECK constraint permits only Active/Inactive/Suspended, so an
+    // archive request is stored as 'Inactive'. Counting 'Archived' (a value never
+    // persisted) always returned 0 (defect 1.21); count the actual persisted
+    // status instead (2.21).
+    const archived = await db.prepare("SELECT COUNT(*) as count FROM users WHERE status = 'Inactive'").get() as any;
     const admins = await db.prepare(`SELECT COUNT(*) as count FROM users WHERE role = ?`).get(UserRole.ADMIN) as any;
     
     const thirtyDaysAgo = new Date();
@@ -124,8 +129,12 @@ export class UserService {
 
   static async createUser(userData: any) {
     const { username, password, name, email, department, job_title_id, role, unit, reporting_manager_id, access_scope, phone_number, notes } = userData;
-    
-    return await db.transaction(async () => {
+
+    // Captured inside the transaction for the post-commit webhook dispatch.
+    let createdUserId: any = null;
+    let createdEmployeeId: string = '';
+
+    const created = await db.transaction(async () => {
       const existingUser = await db.prepare("SELECT id FROM users WHERE username = ?").get(username);
       if (existingUser) {
         throw new ConflictError("Username already exists");
@@ -144,12 +153,19 @@ export class UserService {
         } catch (e) { }
       }
       
-      const latestEmp = await db.prepare("SELECT employee_id FROM users WHERE employee_id LIKE ? ORDER BY CAST(SUBSTR(employee_id, LENGTH(?) + 1) AS INTEGER) DESC LIMIT 1").get(`${deptCode}-%`, `${deptCode}-`) as any;
+      const latestEmp = await db.prepare("SELECT employee_id FROM users WHERE employee_id LIKE ?").all(`${deptCode}-%`) as Array<{ employee_id: string }>;
       let nextNum = 1001;
-      if (latestEmp && latestEmp.employee_id) {
-         const parts = latestEmp.employee_id.split('-');
-         const lastNum = parseInt(parts[1], 10);
-         if (!isNaN(lastNum)) nextNum = lastNum + 1;
+      // Compute the next sequential number in JS rather than via a SQL integer
+      // cast over a substring of employee_id, which threw an invalid-integer
+      // error under Postgres/PGlite once a new-format id like `EMP-1001-A1B2C3`
+      // existed (the substring `1001-A1B2C3` cannot cast to an integer) — defect
+      // 1.21 → 2.21. The leading segment after the `${deptCode}-` prefix is the
+      // sequence number regardless of id format.
+      for (const row of latestEmp) {
+        if (!row || !row.employee_id) continue;
+        const seqPart = row.employee_id.slice(deptCode.length + 1).split('-')[0];
+        const lastNum = parseInt(seqPart, 10);
+        if (!isNaN(lastNum) && lastNum + 1 > nextNum) nextNum = lastNum + 1;
       }
 
       // Generate a unique employee_id that incorporates entropy so two concurrent creations
@@ -171,10 +187,13 @@ export class UserService {
       const MAX_EMP_ID_ATTEMPTS = 5;
       for (let attempt = 1; ; attempt++) {
         try {
+          // Read the new id portably via an explicit `RETURNING id` (not the
+          // SQLite-only insert-rowid metadata) so it is defined under
+          // Postgres/PGlite (Finding 1.3 → 2.3).
           result = await db.prepare(`
             INSERT INTO users (username, password, name, email, department, job_title_id, role, unit, reporting_manager_id, access_scope, phone_number, notes, role_id, status, created_at, requires_password_change, employee_id, requires_2fa_setup)
-            VALUES (?::text, ?::text, ?::text, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::text, ?::uuid, 'Active', CURRENT_TIMESTAMP, 1, ?::text, ?::boolean)
-          `).run(username, hashedPassword, name, email, department || null, job_title_id || null, role, unit || null, reporting_manager_id || null, access_scope || null, phone_number || null, notes || null, role_id, employee_id, requires2faSetup);
+            VALUES (?::text, ?::text, ?::text, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::uuid, ?::text, ?::text, ?::text, ?::uuid, 'Active', CURRENT_TIMESTAMP, 1, ?::text, ?::boolean) RETURNING id
+          `).get(username, hashedPassword, name, email, department || null, job_title_id || null, role, unit || null, reporting_manager_id || null, access_scope || null, phone_number || null, notes || null, role_id, employee_id, requires2faSetup);
           break;
         } catch (insertErr: any) {
           const message = String(insertErr?.message || insertErr || '');
@@ -189,23 +208,34 @@ export class UserService {
         }
       }
       
-      // --- AUTOMATION: Send event to n8n ---
+      createdUserId = result?.id;
+      createdEmployeeId = employee_id;
+
+      return { id: result?.id, username, name, email, department, job_title_id, role, status: 'Active', employee_id };
+    });
+
+    // --- AUTOMATION: Send event to n8n (after commit, outside transaction) ---
+    // External webhooks must never run inside the DB transaction, and a webhook
+    // failure must not roll back the already-committed insert (finding 1.14 → 2.14).
+    try {
       await N8nService.sendEvent('user.created', {
-        userId: result.lastInsertRowid,
+        userId: createdUserId,
         username,
         name,
         email,
         department,
         role,
-        employee_id
+        employee_id: createdEmployeeId
       });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch user.created event:', err);
+    }
 
-      return { id: result.lastInsertRowid, username, name, email, department, job_title_id, role, status: 'Active', employee_id };
-    });
+    return created;
   }
 
   static async updateUser(id: string, userData: any) {
-    return await db.transaction(async () => {
+    const result = await db.transaction(async () => {
       const oldUser = await db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
       if (!oldUser) throw new NotFoundError("User not found");
 
@@ -229,15 +259,23 @@ export class UserService {
           WHERE id = ?::uuid
         `).run(name, email, department || null, job_title_id || null, role, unit || null, reporting_manager_id || null, access_scope || null, phone_number || null, notes || null, role_id, status || oldUser.status, id);
       }
-      
-      // --- AUTOMATION: Send event to n8n ---
+
+      return { oldUser, role_id };
+    });
+
+    // --- AUTOMATION: Send event to n8n (after commit, outside transaction) ---
+    // External webhooks must never run inside the DB transaction, and a webhook
+    // failure must not roll back the already-committed update (finding 1.14 → 2.14).
+    try {
       await N8nService.sendEvent('user.updated', {
         userId: id,
         updates: userData
       });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch user.updated event:', err);
+    }
 
-      return { oldUser, role_id };
-    });
+    return result;
   }
 
   static async setStatus(id: string, status: string) {

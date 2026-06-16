@@ -98,9 +98,10 @@ export function createCachingMiddleware(options: CachingOptions = {}) {
           return res.end() as unknown as Response;
         }
 
-        // Set caching headers
+        // Set caching headers. Use `private` (not `public`) so authenticated/
+        // API responses are not stored by shared/proxy caches (Finding 1.40 → 2.40).
         res.setHeader('ETag', etag);
-        res.setHeader('Cache-Control', `public, max-age=${maxAge}`);
+        res.setHeader('Cache-Control', `private, max-age=${maxAge}`);
       }
 
       return originalJson(body);

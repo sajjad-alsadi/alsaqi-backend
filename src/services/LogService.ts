@@ -143,8 +143,10 @@ export class LogService {
     return true;
   }
 
-  static async getSystemErrorsForExport() {
-    return await db.prepare("SELECT * FROM system_error_log ORDER BY timestamp DESC").all();
+  static async getSystemErrorsForExport(limit = 10000) {
+    // Bound the export to prevent an unbounded read (finding 1.33 → 2.33).
+    const safeLimit = Math.min(Math.max(parseInt(String(limit)) || 10000, 1), 50000);
+    return await db.prepare("SELECT * FROM system_error_log ORDER BY timestamp DESC LIMIT ?").all(safeLimit);
   }
 
   static async getSystemErrorAnalytics() {

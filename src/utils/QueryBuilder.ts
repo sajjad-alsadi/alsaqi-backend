@@ -1,3 +1,14 @@
+import { ValidationError } from './errors';
+
+/**
+ * Identifier pattern permitted in an ORDER BY clause. Allows a leading letter or
+ * underscore followed by letters, digits, underscores, and dots so that
+ * table-qualified columns existing callers rely on (e.g. `i.registration_date`,
+ * `updated_at`) are accepted, while rejecting anything containing whitespace,
+ * quotes, semicolons, parentheses, or other injection-capable characters.
+ */
+const ORDER_BY_IDENTIFIER = /^[a-zA-Z_][a-zA-Z0-9_.]*$/;
+
 export class QueryBuilder {
   private baseQuery: string;
   private whereClauses: string[] = [];
@@ -26,7 +37,11 @@ export class QueryBuilder {
   }
 
   orderBy(column: string, direction: 'ASC' | 'DESC' = 'ASC') {
-    this.orderByClause = `ORDER BY ${column} ${direction}`;
+    if (typeof column !== 'string' || !ORDER_BY_IDENTIFIER.test(column)) {
+      throw new ValidationError(`Invalid ORDER BY identifier: ${column}`);
+    }
+    const dir = String(direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    this.orderByClause = `ORDER BY ${column} ${dir}`;
     return this;
   }
 

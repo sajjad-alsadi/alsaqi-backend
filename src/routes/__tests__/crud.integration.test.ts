@@ -147,19 +147,25 @@ describe('CRUD Generator Integration Tests', () => {
       });
     });
 
-    it('should pass search query parameter to BaseService.findAll', async () => {
+    it('should pass coerced pagination/filter query to BaseService.findAll', async () => {
       mockBaseService.findAll.mockResolvedValue({
         data: [],
-        pagination: { page: 1, pageSize: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
+        pagination: { page: 1, pageSize: 20, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
       });
 
       const req = createAuthenticatedRequest(app);
       await req.get('/api/audit-plans?search=financial');
 
+      // validateQuery now coerces page/pageSize to numbers, and only whitelisted
+      // filter keys reach `where` (finding 1.15 → 2.15). A non-whitelisted param
+      // like `search` is no longer passed through as a `where` filter, so `where`
+      // is the empty (coerced) object.
       expect(mockBaseService.findAll).toHaveBeenCalledWith(
         'audit_plans',
         expect.objectContaining({
-          where: expect.objectContaining({ search: 'financial' }),
+          page: 1,
+          pageSize: 20,
+          where: {},
         })
       );
     });

@@ -869,6 +869,13 @@ CREATE TABLE IF NOT EXISTS audit_trail (
     action TEXT NOT NULL,
     module TEXT NOT NULL,
     details TEXT,
+    -- Tamper-evident hash-chain columns. AuditChainService is the sole writer:
+    -- each entry stores its SHA-256 `hash` over its content + the `previous_hash`
+    -- (the hash of the prior entry), and `seq` is a strictly-increasing insertion
+    -- sequence used as the deterministic chain-ordering tiebreaker.
+    hash TEXT,
+    previous_hash TEXT,
+    seq BIGSERIAL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, timestamp)
 ) PARTITION BY RANGE (timestamp);

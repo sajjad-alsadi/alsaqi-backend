@@ -268,7 +268,8 @@ describe('CRUD Pagination Schema', () => {
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.page).toBe(1);
-      expect(result.data.pageSize).toBe(50);
+      // Canonical unified default page size is 20 (task 9.2 / finding 1.35).
+      expect(result.data.pageSize).toBe(20);
     }
   });
 

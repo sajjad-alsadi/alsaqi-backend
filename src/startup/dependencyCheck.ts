@@ -10,6 +10,7 @@
 
 import pg from 'pg';
 import Redis from 'ioredis';
+import { createSSLConfig } from '../db/sslConfig.js';
 
 export interface DependencyCheckOptions {
   /** PostgreSQL connection string */
@@ -31,10 +32,17 @@ export interface DependencyCheckResult {
  * Checks if PostgreSQL accepts TCP connections by executing a simple query.
  */
 async function checkPostgres(databaseUrl: string): Promise<boolean> {
+  // Respect the same SSL configuration as the main connection pool (finding
+  // 1.40 → 2.40). In production this enforces SSL (with optional CA via
+  // DB_SSL_CA_PATH); in development/local it resolves to undefined (no SSL),
+  // matching db/index.ts so the readiness probe connects exactly like the app.
+  const sslConfig = createSSLConfig(process.env);
+
   const pool = new pg.Pool({
     connectionString: databaseUrl,
     connectionTimeoutMillis: 4000,
     max: 1,
+    ...(sslConfig ? { ssl: sslConfig.ssl } : {}),
   });
 
   try {

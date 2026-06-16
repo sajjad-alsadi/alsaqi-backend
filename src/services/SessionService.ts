@@ -70,7 +70,10 @@ export class SessionService {
     const rememberMe = !!decodedToken.rememberMe;
 
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role, session_version: user.session_version }, JWT_PRIVATE_KEY, { algorithm: 'RS256', expiresIn: '15m' });
-    const newRefreshToken = jwt.sign({ id: user.id, rememberMe }, JWT_PRIVATE_KEY, { algorithm: 'RS256', expiresIn: rememberMe ? '30d' : '8h' });
+    // Carry session_version (and the matching identity claims) in the rotated refresh token so
+    // the revocation check above keeps working after the first rotation. Without it a rotated
+    // token would omit session_version and bypass forced-logout/password-change revocation (Req 2.4).
+    const newRefreshToken = jwt.sign({ id: user.id, username: user.username, role: user.role, session_version: user.session_version, rememberMe }, JWT_PRIVATE_KEY, { algorithm: 'RS256', expiresIn: rememberMe ? '30d' : '8h' });
 
     // Persist only the hash of the rotated refresh token at rest (Req 17.1, 17.5). Compute the
     // hash before any write so a hashing failure aborts persistence without storing plaintext.

@@ -1,6 +1,7 @@
 import { db } from '../db/index';
 import { BaseService } from './BaseService';
 import { ValidationError } from '../utils/errors';
+import { checkWhitelist } from './columnWhitelist';
 
 /**
  * Supported bulk operation types.
@@ -279,6 +280,17 @@ export class BulkOperationsService extends BaseService {
       if (col in body) delete body[col];
     });
 
+    // Enforce the per-table column whitelist so restricted columns can never be
+    // mass-assigned through the bulk path (Finding 1.3 → 2.3). Permitted/whitelisted
+    // columns are still accepted (preservation 3.2).
+    const whitelistResult = checkWhitelist(tableName, body);
+    if (!whitelistResult.ok) {
+      throw new ValidationError(
+        `Restricted columns are not permitted for '${tableName}'`,
+        { rejectedKeys: whitelistResult.rejectedKeys }
+      );
+    }
+
     const keys = Object.keys(body).map(k => this.db.validateIdentifier(k));
     const values = Object.values(body);
 
@@ -288,11 +300,14 @@ export class BulkOperationsService extends BaseService {
 
     const placeholders = keys.map(() => '?').join(',');
     const validatedTable = this.db.validateIdentifier(tableName);
-    const info = await this.db.prepare(
-      `INSERT INTO ${validatedTable} (${keys.join(',')}) VALUES (${placeholders})`
-    ).run(...values) as any;
+    // Read the new id portably via an explicit `RETURNING id` (executed through
+    // get()) instead of the SQLite-only insert-rowid metadata, so `id` is defined
+    // under Postgres/PGlite (Finding 1.3 → 2.3).
+    const inserted = await this.db.prepare(
+      `INSERT INTO ${validatedTable} (${keys.join(',')}) VALUES (${placeholders}) RETURNING id`
+    ).get(...values) as { id: string | number } | undefined;
 
-    return { id: info.lastInsertRowid };
+    return { id: inserted?.id as string | number };
   }
 
   /**
@@ -307,6 +322,17 @@ export class BulkOperationsService extends BaseService {
       'rec_number', 'risk_id', 'employee_id'
     ];
     immutableFields.forEach(col => delete body[col]);
+
+    // Enforce the per-table column whitelist so restricted columns can never be
+    // mass-assigned through the bulk path (Finding 1.3 → 2.3). Permitted/whitelisted
+    // columns are still accepted (preservation 3.2).
+    const whitelistResult = checkWhitelist(tableName, body);
+    if (!whitelistResult.ok) {
+      throw new ValidationError(
+        `Restricted columns are not permitted for '${tableName}'`,
+        { rejectedKeys: whitelistResult.rejectedKeys }
+      );
+    }
 
     const keys = Object.keys(body).map(k => this.db.validateIdentifier(k));
     const values = Object.values(body);

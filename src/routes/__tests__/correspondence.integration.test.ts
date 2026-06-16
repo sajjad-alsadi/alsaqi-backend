@@ -246,13 +246,13 @@ describe('Correspondence Integration Tests', () => {
   describe('PUT /api/correspondence/incoming/:id', () => {
     it('should return 200 on valid update by Admin', async () => {
       const res = await request(app)
-        .put('/api/correspondence/incoming/inc-1')
+        .put('/api/correspondence/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token')
         .send({ subject: 'Updated Subject' });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockCorrespondenceService.updateIncoming).toHaveBeenCalledWith('inc-1', expect.any(Object));
+      expect(mockCorrespondenceService.updateIncoming).toHaveBeenCalledWith('550e8400-e29b-41d4-a716-446655440000', expect.any(Object));
     });
 
     it('should return 403 for non-admin roles', async () => {
@@ -274,7 +274,7 @@ describe('Correspondence Integration Tests', () => {
       });
 
       const res = await request(managerApp)
-        .put('/api/correspondence/incoming/inc-1')
+        .put('/api/correspondence/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token')
         .send({ subject: 'Manager Update' });
 
@@ -285,14 +285,14 @@ describe('Correspondence Integration Tests', () => {
   describe('DELETE /api/correspondence/incoming/:id', () => {
     it('should return 200 on successful deletion by Admin', async () => {
       const res = await request(app)
-        .delete('/api/correspondence/incoming/inc-1')
+        .delete('/api/correspondence/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token');
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockCorrespondenceService.deleteIncoming).toHaveBeenCalledWith('inc-1');
+      expect(mockCorrespondenceService.deleteIncoming).toHaveBeenCalledWith('550e8400-e29b-41d4-a716-446655440000');
       expect(mockAuthService.logAudit).toHaveBeenCalledWith(
-        'testuser', 'DELETE', 'Correspondence', expect.stringContaining('inc-1')
+        'testuser', 'DELETE', 'Correspondence', expect.stringContaining('550e8400-e29b-41d4-a716-446655440000')
       );
     });
 

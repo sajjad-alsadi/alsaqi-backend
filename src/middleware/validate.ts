@@ -3,12 +3,15 @@
  *
  * Validates request body, query parameters, and path parameters against
  * Zod schemas from @alsaqi/shared. Returns field-level errors in the
- * standard error response format.
+ * single canonical error envelope (see utils/responseEnvelope), using the
+ * canonical field-error shape `{ path, message, code }` exposed under
+ * `error.details` — so there is exactly one field-error shape across the API.
  */
 
 import { Request, Response, NextFunction } from 'express';
 import { ZodSchema, ZodError, ZodIssue } from 'zod';
 import { ErrorCodes } from '@alsaqi/shared';
+import { createErrorResponse } from '../utils/responseEnvelope.js';
 
 /**
  * Maximum request body size in bytes (1 MB).
@@ -27,11 +30,14 @@ const FILE_UPLOAD_PATHS = [
 
 /**
  * Represents a single field-level validation error.
+ *
+ * This is the single canonical field-error shape used across the API
+ * (matches the `error.details` entry shape produced by the response envelope).
  */
 export interface FieldError {
-  field: string;
-  rule: string;
+  path: string;
   message: string;
+  code: string;
 }
 
 /**
@@ -44,20 +50,34 @@ export interface ValidateOptions {
 }
 
 /**
- * Converts a Zod issue into a field-level error object.
+ * Converts a Zod issue into a canonical field-level error object
+ * (`{ path, message, code }`).
  */
 function zodIssueToFieldError(issue: ZodIssue): FieldError {
-  const field = issue.path.length > 0 ? issue.path.join('.') : '_root';
-  const rule = issue.code;
+  const path = issue.path.length > 0 ? issue.path.join('.') : '_root';
   const message = issue.message;
-  return { field, rule, message };
+  const code = issue.code;
+  return { path, message, code };
 }
 
 /**
- * Converts a ZodError into an array of field-level errors.
+ * Converts a ZodError into an array of canonical field-level errors.
  */
 function formatZodErrors(error: ZodError): FieldError[] {
   return error.issues.map(zodIssueToFieldError);
+}
+
+/**
+ * Sends a 400 validation error using the single canonical error envelope.
+ */
+function sendValidationError(res: Response, message: string, details: FieldError[]): Response {
+  return res.status(400).json(
+    createErrorResponse({
+      code: ErrorCodes.VALIDATION_ERROR,
+      message,
+      details,
+    })
+  );
 }
 
 /**
@@ -71,15 +91,7 @@ export const validateBody = (schema: ZodSchema) => {
       next();
     } catch (error) {
       if (error instanceof ZodError) {
-        const errors = formatZodErrors(error);
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: ErrorCodes.VALIDATION_ERROR,
-            message: 'Validation failed',
-            errors,
-          },
-        });
+        return sendValidationError(res, 'Validation failed', formatZodErrors(error));
       }
       next(error);
     }
@@ -93,19 +105,21 @@ export const validateQuery = (schema: ZodSchema) => {
   return (req: Request, res: Response, next: NextFunction) => {
     try {
       const parsed = schema.parse(req.query);
-      (req as any).query = parsed;
+      // Express 5 exposes `req.query` as a getter-only property, so a plain
+      // assignment (`req.query = parsed`) throws "Cannot set property query ...
+      // which has only a getter". Replace the accessor with a writable data
+      // property carrying the validated/coerced value instead. This does NOT
+      // loosen validation — it only persists the already-parsed result.
+      Object.defineProperty(req, 'query', {
+        value: parsed,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
       next();
     } catch (error) {
       if (error instanceof ZodError) {
-        const errors = formatZodErrors(error);
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: ErrorCodes.VALIDATION_ERROR,
-            message: 'Query parameter validation failed',
-            errors,
-          },
-        });
+        return sendValidationError(res, 'Query parameter validation failed', formatZodErrors(error));
       }
       next(error);
     }
@@ -123,15 +137,7 @@ export const validateParams = (schema: ZodSchema) => {
       next();
     } catch (error) {
       if (error instanceof ZodError) {
-        const errors = formatZodErrors(error);
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: ErrorCodes.VALIDATION_ERROR,
-            message: 'Path parameter validation failed',
-            errors,
-          },
-        });
+        return sendValidationError(res, 'Path parameter validation failed', formatZodErrors(error));
       }
       next(error);
     }
@@ -152,7 +158,7 @@ export const validate = (options: ValidateOptions) => {
         (req as any).params = parsed;
       } catch (error) {
         if (error instanceof ZodError) {
-          allErrors.push(...formatZodErrors(error).map((e) => ({ ...e, field: `params.${e.field}` })));
+          allErrors.push(...formatZodErrors(error).map((e) => ({ ...e, path: `params.${e.path}` })));
         } else {
           return next(error);
         }
@@ -162,10 +168,17 @@ export const validate = (options: ValidateOptions) => {
     if (options.query) {
       try {
         const parsed = options.query.parse(req.query);
-        (req as any).query = parsed;
+        // Express 5 `req.query` is getter-only; replace the accessor with the
+        // validated value via defineProperty rather than a throwing assignment.
+        Object.defineProperty(req, 'query', {
+          value: parsed,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        });
       } catch (error) {
         if (error instanceof ZodError) {
-          allErrors.push(...formatZodErrors(error).map((e) => ({ ...e, field: `query.${e.field}` })));
+          allErrors.push(...formatZodErrors(error).map((e) => ({ ...e, path: `query.${e.path}` })));
         } else {
           return next(error);
         }
@@ -178,7 +191,7 @@ export const validate = (options: ValidateOptions) => {
         req.body = parsed;
       } catch (error) {
         if (error instanceof ZodError) {
-          allErrors.push(...formatZodErrors(error).map((e) => ({ ...e, field: `body.${e.field}` })));
+          allErrors.push(...formatZodErrors(error).map((e) => ({ ...e, path: `body.${e.path}` })));
         } else {
           return next(error);
         }
@@ -186,14 +199,7 @@ export const validate = (options: ValidateOptions) => {
     }
 
     if (allErrors.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: ErrorCodes.VALIDATION_ERROR,
-          message: 'Validation failed',
-          errors: allErrors,
-        },
-      });
+      return sendValidationError(res, 'Validation failed', allErrors);
     }
 
     next();
@@ -214,27 +220,23 @@ export const bodySizeLimit = (req: Request, res: Response, next: NextFunction) =
     return next();
   }
 
-  const contentLength = req.headers['content-length'];
-  if (contentLength && parseInt(contentLength, 10) > MAX_BODY_SIZE) {
-    return res.status(413).json({
-      success: false,
-      error: {
+  const tooLarge = () =>
+    res.status(413).json(
+      createErrorResponse({
         code: ErrorCodes.PAYLOAD_TOO_LARGE,
         message: 'Request body exceeds the maximum allowed size of 1 MB',
-      },
-    });
+      })
+    );
+
+  const contentLength = req.headers['content-length'];
+  if (contentLength && parseInt(contentLength, 10) > MAX_BODY_SIZE) {
+    return tooLarge();
   }
 
   if (req.body && typeof req.body === 'object') {
     const bodyStr = JSON.stringify(req.body);
     if (Buffer.byteLength(bodyStr, 'utf8') > MAX_BODY_SIZE) {
-      return res.status(413).json({
-        success: false,
-        error: {
-          code: ErrorCodes.PAYLOAD_TOO_LARGE,
-          message: 'Request body exceeds the maximum allowed size of 1 MB',
-        },
-      });
+      return tooLarge();
     }
   }
 
@@ -257,34 +259,20 @@ export const validateIdParam = (paramName = 'id') => {
     const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
 
     if (!value) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: ErrorCodes.VALIDATION_ERROR,
-          message: `Path parameter '${paramName}' is required`,
-          errors: [{ field: paramName, rule: 'required', message: `${paramName} is required` }],
-        },
-      });
+      return sendValidationError(res, `Path parameter '${paramName}' is required`, [
+        { path: paramName, message: `${paramName} is required`, code: 'required' },
+      ]);
     }
 
     const isInteger = /^\d+$/.test(value);
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 
     if (!isInteger && !isUUID) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: ErrorCodes.VALIDATION_ERROR,
-          message: `Path parameter '${paramName}' must be a valid integer or UUID`,
-          errors: [
-            {
-              field: paramName,
-              rule: 'format',
-              message: `${paramName} must be a valid integer or UUID`,
-            },
-          ],
-        },
-      });
+      return sendValidationError(
+        res,
+        `Path parameter '${paramName}' must be a valid integer or UUID`,
+        [{ path: paramName, message: `${paramName} must be a valid integer or UUID`, code: 'format' }]
+      );
     }
 
     next();

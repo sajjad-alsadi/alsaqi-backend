@@ -25,6 +25,8 @@ export interface RedisManagerOptions {
   reconnectInterval?: number;
   /** Maximum reconnect attempts (default: 3) */
   maxReconnectAttempts?: number;
+  /** Maximum backoff interval in milliseconds for continued recovery (default: 60000) */
+  maxBackoffMs?: number;
 }
 
 export type RedisConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'degraded';
@@ -40,12 +42,14 @@ export class RedisManager {
   private readonly connectTimeout: number;
   private readonly reconnectInterval: number;
   private readonly maxReconnectAttempts: number;
+  private readonly maxBackoffMs: number;
 
   constructor(options: RedisManagerOptions = {}) {
     this.url = options.url || process.env.REDIS_URL || '';
     this.connectTimeout = options.connectTimeout ?? 5000;
     this.reconnectInterval = options.reconnectInterval ?? 5000;
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? 3;
+    this.maxBackoffMs = options.maxBackoffMs ?? 60_000;
   }
 
   /** Current connection status */
@@ -158,25 +162,38 @@ export class RedisManager {
 
   /**
    * Schedules a reconnection attempt.
-   * Requirement 2.4: attempt reconnection every 5 seconds up to 3 attempts.
+   *
+   * Finding 1.25 → 2.25: the manager NEVER permanently gives up. The first
+   * `maxReconnectAttempts` retries use the fixed `reconnectInterval`; once those
+   * are exhausted it KEEPS attempting recovery using an exponential backoff
+   * (`reconnectInterval * 2^n`, capped at `maxBackoffMs`) so Redis can reconnect
+   * without a process restart.
    */
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return; // Already scheduled
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      logger.error(
-        `[Redis] Max reconnection attempts (${this.maxReconnectAttempts}) exhausted. ` +
-        'Continuing without cache. Manual intervention may be required.'
+
+    const exhausted = this.reconnectAttempts >= this.maxReconnectAttempts;
+
+    // Compute the next delay. Before exhaustion: the fixed interval. After
+    // exhaustion: exponential backoff (Math.pow) capped at maxBackoffMs.
+    const exponent = exhausted ? this.reconnectAttempts - this.maxReconnectAttempts + 1 : 0;
+    const backoffMs = exhausted
+      ? Math.min(this.maxBackoffMs, this.reconnectInterval * Math.pow(2, exponent))
+      : this.reconnectInterval;
+
+    // Log the transition into backoff-recovery mode exactly once.
+    if (exhausted && this.reconnectAttempts === this.maxReconnectAttempts) {
+      logger.warn(
+        `[Redis] Initial reconnection attempts (${this.maxReconnectAttempts}) exhausted. ` +
+        'Continuing recovery with exponential backoff (no permanent give-up).'
       );
-      return;
     }
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       this.reconnectAttempts++;
 
-      logger.info(
-        `[Redis] Attempting reconnection (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
-      );
+      logger.info(`[Redis] Attempting reconnection (attempt ${this.reconnectAttempts})...`);
 
       try {
         await this.createConnection();
@@ -187,7 +204,7 @@ export class RedisManager {
         this._status = 'degraded';
         this.scheduleReconnect();
       }
-    }, this.reconnectInterval);
+    }, backoffMs);
   }
 
   /** Clears the reconnection timer */

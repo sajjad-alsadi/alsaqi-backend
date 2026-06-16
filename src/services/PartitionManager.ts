@@ -118,6 +118,9 @@ export class PartitionManager {
         action TEXT NOT NULL,
         module TEXT NOT NULL,
         details TEXT,
+        hash TEXT,
+        previous_hash TEXT,
+        seq BIGSERIAL,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id, timestamp)
       ) PARTITION BY RANGE (timestamp)
@@ -171,10 +174,12 @@ export class PartitionManager {
         }
       }
 
-      // Insert data into partitioned table
+      // Insert data into partitioned table. The hash-chain columns
+      // (hash/previous_hash/seq) are carried over verbatim so the rebuilt table
+      // preserves the existing chain linkage and ordering.
       await db.exec(`
-        INSERT INTO audit_trail_partitioned (id, "user", action, module, details, timestamp)
-        SELECT id, "user", action, module, details, timestamp
+        INSERT INTO audit_trail_partitioned (id, "user", action, module, details, hash, previous_hash, seq, timestamp)
+        SELECT id, "user", action, module, details, hash, previous_hash, seq, timestamp
         FROM audit_trail
       `);
     }

@@ -170,8 +170,10 @@ export class TOTPServiceImpl implements TOTPService {
    * @returns true if the code is valid, false otherwise
    */
   async verify(userId: string, token: string): Promise<boolean> {
+    // Read last_used_at alongside the secret so reuse within the validity
+    // window can be rejected (replay protection).
     const record = await db.prepare(
-      'SELECT secret_encrypted, secret_iv, secret_tag, is_enabled FROM user_totp WHERE user_id = ?'
+      'SELECT secret_encrypted, secret_iv, secret_tag, is_enabled, last_used_at FROM user_totp WHERE user_id = ?'
     ).get(userId) as any;
 
     if (!record) {
@@ -191,35 +193,52 @@ export class TOTPServiceImpl implements TOTPService {
       secret: OTPAuth.Secret.fromBase32(secret),
     });
 
-    // Validate with ±1 window using timing-safe comparison
-    // OTPAuth.TOTP.validate returns the time step difference or null if invalid
+    // Validate with ±1 window.
+    // OTPAuth.TOTP.validate returns the time-step difference (delta) or null if invalid.
     const delta = totp.validate({ token, window: 1 });
 
-    if (delta !== null) {
-      // Additional timing-safe comparison as defense-in-depth
-      const expectedToken = totp.generate();
-      const tokenBuffer = Buffer.from(token.padStart(TOTP_DIGITS, '0'), 'utf8');
-      const expectedBuffer = Buffer.from(expectedToken.padStart(TOTP_DIGITS, '0'), 'utf8');
-
-      // Even though OTPAuth already validated, we perform timing-safe check
-      // to ensure no timing leakage in our code path
-      try {
-        crypto.timingSafeEqual(tokenBuffer, expectedBuffer);
-      } catch {
-        // Length mismatch — still valid from OTPAuth's perspective (window match)
-      }
-
-      // Update last_used_at
-      await db.prepare(
-        'UPDATE user_totp SET last_used_at = CURRENT_TIMESTAMP WHERE user_id = ?'
-      ).run(userId);
-
-      logger.info(`[TOTPService] TOTP verified successfully for user ${userId}`);
-      return true;
+    if (delta === null) {
+      logger.warn(`[TOTPService] TOTP verification failed for user ${userId}`);
+      return false;
     }
 
-    logger.warn(`[TOTPService] TOTP verification failed for user ${userId}`);
-    return false;
+    // Defense-in-depth: constant-time comparison against the code expected for
+    // the matched time step. The result GATES acceptance — a mismatch (or a
+    // length difference) is treated as a failed verification.
+    const matchTimestamp = Date.now() + delta * TOTP_PERIOD * 1000;
+    const expectedToken = totp.generate({ timestamp: matchTimestamp });
+    const tokenBuffer = Buffer.from(token.padStart(TOTP_DIGITS, '0'), 'utf8');
+    const expectedBuffer = Buffer.from(expectedToken.padStart(TOTP_DIGITS, '0'), 'utf8');
+    const constantTimeMatch =
+      tokenBuffer.length === expectedBuffer.length &&
+      crypto.timingSafeEqual(tokenBuffer, expectedBuffer);
+
+    if (!constantTimeMatch) {
+      logger.warn(`[TOTPService] TOTP verification failed for user ${userId}`);
+      return false;
+    }
+
+    // Replay protection: reject a code reused within its validity window.
+    // Compute the start of the matched code's time step; if a successful
+    // verification was already recorded at or after that instant, the same
+    // (or an equally-recent) code has already been consumed.
+    const matchedCounter = Math.floor(Date.now() / 1000 / TOTP_PERIOD) + delta;
+    const codeWindowStartMs = matchedCounter * TOTP_PERIOD * 1000;
+    if (record.last_used_at) {
+      const lastUsedMs = new Date(record.last_used_at).getTime();
+      if (!Number.isNaN(lastUsedMs) && lastUsedMs >= codeWindowStartMs) {
+        logger.warn(`[TOTPService] TOTP replay rejected for user ${userId}`);
+        return false;
+      }
+    }
+
+    // Record this successful use to block subsequent replays.
+    await db.prepare(
+      'UPDATE user_totp SET last_used_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).run(userId);
+
+    logger.info(`[TOTPService] TOTP verified successfully for user ${userId}`);
+    return true;
   }
 
   /**

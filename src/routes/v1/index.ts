@@ -149,7 +149,7 @@ export function createV1Router(deps: V1RouterDeps): express.Router {
   v1Router.use('/notifications', createNotificationRoutes(db, authenticate));
 
   // Comments Routes
-  v1Router.use('/comments', createCommentRoutes(db, authenticate, logError));
+  v1Router.use('/comments', createCommentRoutes(db, authenticate, checkPermission, logError));
 
   // Modular Routes
   v1Router.use('/job-titles', createJobTitleRoutes(db, authenticate, checkPermission, logError));
@@ -173,9 +173,9 @@ export function createV1Router(deps: V1RouterDeps): express.Router {
   v1Router.use('/analytics', createAnalyticsRoutes(db, authenticate, checkPermission, logError));
   v1Router.use('/', createIntegrityRoutes(authenticate));
   v1Router.use('/audit-programs', createAuditProgramRoutes(db, authenticate, checkPermission, logError));
-  v1Router.use('/audit-tasks', createAuditTaskRoutes(db, authenticate, logError));
+  v1Router.use('/audit-tasks', createAuditTaskRoutes(db, authenticate, checkPermission, logError));
   v1Router.use('/audit-findings', createAuditFindingRoutes(db, authenticate, checkPermission, logError));
-  v1Router.use('/recommendations', createRecommendationRoutes(db, authenticate, logError));
+  v1Router.use('/recommendations', createRecommendationRoutes(db, authenticate, checkPermission, logError));
 
   // Archive Routes
   v1Router.use('/', createArchiveRoutes(db, authenticate, checkPermission, logError));
@@ -185,7 +185,7 @@ export function createV1Router(deps: V1RouterDeps): express.Router {
   v1Router.use('/compliance', createComplianceRoutes(db, authenticate, checkPermission, logError, saveFile));
 
   // Bulk Operations
-  v1Router.use('/bulk', createBulkRoutes(authenticate));
+  v1Router.use('/bulk', createBulkRoutes(authenticate, checkPermission));
 
   // Admin Routes
   v1Router.use('/admin', createAdminBackupRoutes(authenticate, checkPermission));

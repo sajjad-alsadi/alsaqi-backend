@@ -268,11 +268,18 @@ export class PdfEngine {
         }
       });
 
-      // Set content with timeout
-      await Promise.race([
-        page.setContent(fullHtml, { waitUntil: 'load' }),
-        this.timeout(RENDER_TIMEOUT_MS, 'setContent'),
-      ]);
+      // Set content with timeout. The timeout timer is cleared as soon as the
+      // race settles so no orphaned 30s timer lingers (which would otherwise fire
+      // a late rejection / unhandledRejection). (Finding 1.38 → 2.38.)
+      const setContentTimer = this.timeout(RENDER_TIMEOUT_MS, 'setContent');
+      try {
+        await Promise.race([
+          page.setContent(fullHtml, { waitUntil: 'load' }),
+          setContentTimer.promise,
+        ]);
+      } finally {
+        setContentTimer.clear();
+      }
 
       // Generate PDF with timeout
       const pdfOptions: Parameters<typeof page.pdf>[0] = {
@@ -294,10 +301,16 @@ export class PdfEngine {
         pdfOptions.footerTemplate = settings.footer_template || '';
       }
 
-      const pdfBuffer = await Promise.race([
-        page.pdf(pdfOptions),
-        this.timeout(RENDER_TIMEOUT_MS, 'page.pdf'),
-      ]) as Buffer;
+      const pdfTimer = this.timeout(RENDER_TIMEOUT_MS, 'page.pdf');
+      let pdfBuffer: Buffer;
+      try {
+        pdfBuffer = (await Promise.race([
+          page.pdf(pdfOptions),
+          pdfTimer.promise,
+        ])) as Buffer;
+      } finally {
+        pdfTimer.clear();
+      }
 
       const buffer = Buffer.from(pdfBuffer);
 
@@ -330,16 +343,27 @@ export class PdfEngine {
   }
 
   /**
-   * Creates a timeout promise that rejects after the specified duration.
+   * Creates a cancellable timeout. Returns the rejecting `promise` for use in a
+   * `Promise.race`, plus a `clear()` that cancels the underlying timer. Callers
+   * MUST invoke `clear()` once the race settles so the timer never fires after
+   * the winning operation completes (no leaked 30s timer / late rejection).
+   * (Finding 1.38 → 2.38.)
    */
-  private timeout(ms: number, operation: string): Promise<never> {
-    return new Promise((_, reject) => {
-      setTimeout(() => {
+  private timeout(ms: number, operation: string): { promise: Promise<never>; clear: () => void } {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const promise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
         reject(new PdfRenderTimeoutError(
           `Puppeteer ${operation} exceeded ${ms / 1000} second timeout`
         ));
       }, ms);
     });
+    return {
+      promise,
+      clear: () => {
+        if (timer !== undefined) clearTimeout(timer);
+      },
+    };
   }
 
   /**

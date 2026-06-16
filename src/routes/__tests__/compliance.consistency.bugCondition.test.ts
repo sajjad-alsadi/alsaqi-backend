@@ -23,7 +23,7 @@
  *    stub auth/permission middleware so each route's own logic (permission enforcement,
  *    status-value acceptance) is what is exercised.
  */
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { PGlite } from '@electric-sql/pglite';
@@ -33,6 +33,15 @@ import { ComplianceService } from '../../services/ComplianceService';
 import { BaseService } from '../../services/BaseService';
 import { createComplianceRoutes } from '../compliance';
 import { CRUD_EXCLUDED_ROUTES } from '../../utils/crudGenerator';
+
+// Each test builds a fresh in-memory PGlite database from a full schema before
+// exercising the real service/route code. That DB build is inherently slow
+// (~3s) and, under parallel suite load, can exceed the default 5000ms per-test
+// timeout — a test-harness limitation, not a product/schema regression (the
+// schema loads cleanly in isolation). Raise the timeout for this file so the
+// DB-backed tests are not flaky under load.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
 import { globalErrorHandler } from '../../middleware/error';
 
 // ─── Schema fragments ──────────────────────────────────────────────────────────

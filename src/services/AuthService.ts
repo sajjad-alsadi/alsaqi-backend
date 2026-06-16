@@ -169,7 +169,11 @@ export class AuthService {
         console.error("[AuthService] Failed to create user session", e);
       }
 
-      // Fetch user permissions from DB (role_permissions + user_permissions)
+      // Fetch user EFFECTIVE permissions from DB (role_permissions + user_permissions).
+      // Effective permissions = role grants UNION user allow-overrides, then SUBTRACT
+      // explicit user denies (is_allowed = 0). The trailing EXCEPT clause subtracts the
+      // denies so an explicit deny overrides a grant, matching the canonical resolution
+      // semantics in PermissionService.resolvePermission (finding 1.28).
       let permissions: Array<{ module: string; action: string }> = [];
       try {
         permissions = await db.prepare(`
@@ -180,7 +184,11 @@ export class AuthService {
           SELECT p.module, p.action FROM permissions p
           JOIN user_permissions up ON p.id = up.permission_id
           WHERE up.user_id = ?::uuid AND up.is_allowed = 1
-        `).all(user.id, user.id) as Array<{ module: string; action: string }>;
+          EXCEPT
+          SELECT p.module, p.action FROM permissions p
+          JOIN user_permissions up ON p.id = up.permission_id
+          WHERE up.user_id = ?::uuid AND up.is_allowed = 0
+        `).all(user.id, user.id, user.id) as Array<{ module: string; action: string }>;
       } catch (e) {
         console.error("[AuthService] Failed to fetch permissions during login:", e);
       }

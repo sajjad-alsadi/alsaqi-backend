@@ -21,7 +21,7 @@ export const createAuditProgramRoutes = (db: any, authenticate: any, checkPermis
   // ─── Custom Operations (must be before /:id to prevent matching) ──────────
 
   // POST /:id/duplicate — Duplicate an audit program
-  router.post("/:id/duplicate", authenticate, asyncHandler(async (req, res) => {
+  router.post("/:id/duplicate", authenticate, checkPermission(MODULE_NAME, 'Create'), asyncHandler(async (req, res) => {
     const typedReq = req as unknown as AuthenticatedRequest;
     const id = req.params.id as string;
     if (!id || id === 'undefined') {
@@ -37,7 +37,7 @@ export const createAuditProgramRoutes = (db: any, authenticate: any, checkPermis
   }));
 
   // POST /:id/approve — Approve an audit program
-  router.post("/:id/approve", authenticate, asyncHandler(async (req, res) => {
+  router.post("/:id/approve", authenticate, checkPermission(MODULE_NAME, 'Approve'), asyncHandler(async (req, res) => {
     const typedReq = req as unknown as AuthenticatedRequest;
     const id = req.params.id as string;
     if (!id || id === 'undefined') {

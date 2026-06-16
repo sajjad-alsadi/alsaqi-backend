@@ -36,13 +36,39 @@ vi.mock('../../utils/n8nService', () => ({
   },
 }));
 
+// Mock PermissionService. Task 4.5 authorizes the Pending Approval→Closed
+// APPROVE gate in changeFindingStatus against the user's EFFECTIVE DB
+// permissions via PermissionService.getUserPermissions(userId) rather than the
+// static DEFAULT_PERMISSIONS map. Mocking it here keeps the sequential `db`
+// mock in sync (the real service would issue extra db.prepare reads) and lets
+// each scenario declare whether APPROVE is effectively granted.
+vi.mock('../PermissionService', () => ({
+  PermissionService: {
+    getUserPermissions: vi.fn(),
+  },
+}));
+
 import { AuditService, CreateFindingInput, ALLOWED_FINDING_TRANSITIONS, FINDING_TO_RECOMMENDATION_STATUS } from '../AuditService';
 import { NumberingService } from '../NumberingService';
 import { NotificationService } from '../NotificationService';
 import { N8nService } from '../../utils/n8nService';
+import { PermissionService } from '../PermissionService';
 import { db } from '../../db/index';
 import { ValidationError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { UserRole } from '@alsaqi/shared';
+import { MODULES, PERMISSIONS } from '../../permissions.js';
+
+/** Build an effective-permission set granting the given audit-findings actions. */
+function effectiveFindingPermissions(actions: string[]) {
+  return {
+    userId: 'user-uuid-123',
+    role: 'Test',
+    roleId: 'role-1',
+    isCustomRole: false,
+    permissions: { [MODULES.AUDIT_FINDINGS]: actions },
+    overrides: [],
+  } as any;
+}
 
 describe('AuditService', () => {
   const mockDb = db as any;
@@ -50,6 +76,11 @@ describe('AuditService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: user has APPROVE on audit findings (overridden per-test where a
+    // forbidden scenario is exercised). Only consulted on Pending Approval→Closed.
+    (PermissionService.getUserPermissions as any).mockResolvedValue(
+      effectiveFindingPermissions([PERMISSIONS.APPROVE])
+    );
   });
 
   describe('createFinding', () => {
@@ -599,6 +630,7 @@ describe('AuditService', () => {
       mockDb.prepare.mockReturnValueOnce({
         get: vi.fn().mockResolvedValue({ ...baseFinding, status: 'Pending Approval' }),
       });
+      (PermissionService.getUserPermissions as any).mockResolvedValueOnce(effectiveFindingPermissions([]));
 
       await expect(
         AuditService.changeFindingStatus(findingId, 'Closed', userId, UserRole.INTERNAL_AUDITOR)

@@ -22,7 +22,11 @@ export const createCoiRoutes = (
 ) => {
   const router = express.Router();
 
-  router.get('/coi', authenticate, asyncHandler(async (req, res) => {
+  // Object-level authorization (IDOR fix, finding 1.7 → 2.7): COI records are
+  // Integrity Management resources, so only users entitled to view that module
+  // may read them — an authenticated user without the entitlement no longer
+  // receives every COI declaration.
+  router.get('/coi', authenticate, checkPermission('IntegrityManagement', 'View'), asyncHandler(async (req, res) => {
     const records = await CoiService.getAll();
     res.json(records);
   }));

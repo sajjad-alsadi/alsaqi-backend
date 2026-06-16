@@ -1,5 +1,6 @@
 import { db } from '../db/index';
 import { NotFoundError, ValidationError } from '../utils/errors';
+import { AuditChainService } from './AuditChainService';
 
 export class JobTitleService {
   static async getAll() {
@@ -11,8 +12,12 @@ export class JobTitleService {
     const stmt = db.prepare(`INSERT INTO job_titles (name, department, job_level, description, reporting_to, status) VALUES (?, ?, ?, ?, ?, ?)`);
     const info = await stmt.run(name, department, job_level, description, reporting_to || null, status || 'Active');
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, "Created Job Title", "Job Titles", `Created job title ${name}`);
+    await AuditChainService.append({
+      user: username,
+      action: 'Created Job Title',
+      module: 'Job Titles',
+      details: `Created job title ${name}`,
+    });
       
     return { id: info.lastInsertRowid, name, department, job_level, description, reporting_to, status: status || 'Active' };
   }
@@ -22,8 +27,12 @@ export class JobTitleService {
     await db.prepare(`UPDATE job_titles SET name = ?, department = ?, job_level = ?, description = ?, reporting_to = ?, status = ? WHERE id = ?`)
       .run(name, department, job_level, description, reporting_to || null, status, id);
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, "Updated Job Title", "Job Titles", `Updated job title ID ${id}`);
+    await AuditChainService.append({
+      user: username,
+      action: 'Updated Job Title',
+      module: 'Job Titles',
+      details: `Updated job title ID ${id}`,
+    });
       
     return true;
   }
@@ -40,8 +49,12 @@ export class JobTitleService {
     
     await db.prepare(`DELETE FROM job_titles WHERE id = ?`).run(id);
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, "Deleted Job Title", "Job Titles", `Deleted job title ${jobTitle.name}`);
+    await AuditChainService.append({
+      user: username,
+      action: 'Deleted Job Title',
+      module: 'Job Titles',
+      details: `Deleted job title ${jobTitle.name}`,
+    });
       
     return true;
   }

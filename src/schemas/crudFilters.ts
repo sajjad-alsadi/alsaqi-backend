@@ -16,8 +16,8 @@ export const crudPaginationSchema = z.object({
     .number()
     .int({ message: 'pageSize must be an integer' })
     .min(1, { message: 'pageSize must be at least 1' })
-    .max(200, { message: 'pageSize must not exceed 200' })
-    .default(50),
+    .max(100, { message: 'pageSize must not exceed 100' })
+    .default(20),
 });
 
 /**

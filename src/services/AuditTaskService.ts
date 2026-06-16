@@ -248,10 +248,11 @@ export class AuditTaskService {
     
     let countQuery = "SELECT COUNT(*) as total FROM audit_tasks t";
     const args: any[] = [];
-    let whereClause = "";
+    // Always exclude soft-deleted tasks (finding 1.31 → 2.31).
+    let whereClause = " WHERE t.deleted_at IS NULL";
 
     if (params.plan_id) {
-      whereClause = " WHERE t.plan_id = ?";
+      whereClause += " AND t.plan_id = ?";
       args.push(params.plan_id);
     }
 

@@ -1,6 +1,11 @@
 import crypto from 'crypto';
 import logger from '../utils/logger';
-import { getFileAccessSecret, getFileSignedUrlMaxTtlS } from '../config/environmentConfig';
+import {
+  getFileAccessSecret,
+  getFileSignedUrlMaxTtlS,
+  getFileEncryptionKey,
+  getTotpEncryptionKey,
+} from '../config/environmentConfig';
 
 /**
  * Minimum TTL: 5 minutes (in seconds)
@@ -61,12 +66,21 @@ export class SecureFileService {
   }
 
   /**
-   * Fail-fast startup assertion for the dedicated file-access secret.
+   * Fail-fast startup assertion for the dedicated file-access secret and the
+   * at-rest encryption keys.
    *
    * Writes a fatal configuration error and terminates the process with a
    * non-zero exit code when `FILE_ACCESS_SECRET` is unset/whitespace-only
-   * (Req 9.1) or shorter than the minimum length (Req 9.2). Intended to be
-   * called during the startup sequence before any port binding.
+   * (Req 9.1) or shorter than the minimum length (Req 9.2).
+   *
+   * Additionally, when running in production, asserts that both
+   * `FILE_ENCRYPTION_KEY` and `TOTP_ENCRYPTION_KEY` are present so files (and
+   * persisted TOTP secrets) are never written plaintext due to a missing key
+   * (Req 2.11). A missing key is fatal in production — failing fast exactly like
+   * `FILE_ACCESS_SECRET` — rather than a silent warning. Outside production the
+   * keys are not required, so dev/test boot is preserved.
+   *
+   * Intended to be called during the startup sequence before any port binding.
    */
   static assertConfigured(): void {
     const secret = getFileAccessSecret();
@@ -85,6 +99,27 @@ export class SecureFileService {
           `received a value of length ${secret.length}.`
       );
       process.exit(1);
+    }
+
+    // Encryption-at-rest keys (Req 2.11). Asserted in production only so a
+    // missing key fails fast instead of silently disabling encryption (files
+    // written plaintext). Dev/test environments do not require these keys.
+    if (process.env.NODE_ENV === 'production') {
+      if (!getFileEncryptionKey()) {
+        logger.error(
+          'FATAL: FILE_ENCRYPTION_KEY is not configured. Set a dedicated file-encryption key ' +
+            'before starting the service so uploaded files are never written plaintext.'
+        );
+        process.exit(1);
+      }
+
+      if (!getTotpEncryptionKey()) {
+        logger.error(
+          'FATAL: TOTP_ENCRYPTION_KEY is not configured. Set a dedicated TOTP-encryption key ' +
+            'before starting the service so persisted TOTP secrets are never written plaintext.'
+        );
+        process.exit(1);
+      }
     }
   }
 

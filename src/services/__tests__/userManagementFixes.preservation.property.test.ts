@@ -50,11 +50,14 @@ vi.mock('../../db/index', () => {
   return { db };
 });
 
-// bcryptjs is used directly by PasswordService (compareSync/hashSync).
+// bcryptjs is used directly by PasswordService. Task 5.6 made the hash/compare
+// calls async (bcrypt.hash / bcrypt.compare), so stub the async variants too
+// (the sync hashSync/compareSync remain stubbed for any legacy call sites).
 const { bcryptMock } = vi.hoisted(() => ({
   bcryptMock: {
     hashSync: vi.fn(() => 'hashed_pw'),
     compareSync: vi.fn(() => false),
+    hash: vi.fn(async () => 'hashed_pw'),
     compare: vi.fn(async () => false),
   },
 }));
@@ -121,6 +124,8 @@ beforeEach(() => {
   resetDb(null);
   verifyPasswordMock.mockResolvedValue(false);
   bcryptMock.compareSync.mockReturnValue(false);
+  bcryptMock.compare.mockResolvedValue(false);
+  bcryptMock.hash.mockResolvedValue('hashed_pw');
   // Clear the real permission cache between cases so deterministic resolution is observed.
   PermissionService.invalidateCache();
 });
@@ -256,8 +261,9 @@ describe('Property 11: Preservation — non-buggy inputs unchanged (user-managem
       if (sql.includes('password_history')) return [{ password_hash: 'reused_hash' }];
       return undefined;
     });
-    // First compareSync (vs current) false; subsequent (vs history) true → reuse rejected.
-    bcryptMock.compareSync.mockReturnValueOnce(false).mockReturnValue(true);
+    // First compare (vs current) false; subsequent (vs history) true → reuse rejected.
+    // changePassword now uses async bcrypt.compare (task 5.6).
+    bcryptMock.compare.mockResolvedValueOnce(false).mockResolvedValue(true);
 
     await expect(PasswordService.changePassword('u-1', 'CompliantPass1!')).rejects.toBeInstanceOf(ValidationError);
   });

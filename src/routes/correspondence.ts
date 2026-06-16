@@ -5,6 +5,8 @@ import { CorrespondenceService } from '../services/CorrespondenceService';
 import { AuthService } from '../services/AuthService';
 import { ValidationError } from '../utils/errors';
 import { parsePaginationParams } from '../utils/paginationService';
+import { validateBody, validateParams, validateQuery } from '../middleware/validate';
+import { correspondenceAttachmentSchema, idParamSchema, crudQuerySchema } from '../schemas';
 
 const incomingSchema = z.object({
   letter_number: z.string().min(1).max(100),
@@ -63,12 +65,12 @@ export const createCorrespondenceRoutes = (
   const router = express.Router();
 
   // 1. Incoming Correspondence
-  router.get("/incoming", authenticate, asyncHandler(async (req, res) => {
+  router.get("/incoming", authenticate, validateQuery(crudQuerySchema), asyncHandler(async (req, res) => {
     const result = await CorrespondenceService.getIncoming(req.query);
     res.json(result);
   }));
 
-  router.post("/incoming", authenticate, asyncHandler(async (req, res) => {
+  router.post("/incoming", authenticate, checkPermission('Correspondence', 'Create'), asyncHandler(async (req, res) => {
     const validation = incomingSchema.safeParse(req.body);
     if (!validation.success) {
       throw new ValidationError("Invalid incoming correspondence data", validation.error.format());
@@ -80,7 +82,7 @@ export const createCorrespondenceRoutes = (
     res.json(result);
   }));
 
-  router.put("/incoming/:id", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
+  router.put("/incoming/:id", authenticate, checkPermission('Correspondence', 'Edit'), validateParams(idParamSchema), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     const validation = incomingSchema.partial().safeParse(req.body);
     if (!validation.success) {
@@ -92,7 +94,7 @@ export const createCorrespondenceRoutes = (
     res.json({ success: true });
   }));
 
-  router.delete("/incoming/:id", authenticate, checkPermission('Correspondence', 'Delete'), asyncHandler(async (req, res) => {
+  router.delete("/incoming/:id", authenticate, checkPermission('Correspondence', 'Delete'), validateParams(idParamSchema), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
     await CorrespondenceService.deleteIncoming(id);
     
@@ -101,7 +103,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 2. Status History and Updates
-  router.put("/status/:type/:id", authenticate, asyncHandler(async (req, res) => {
+  router.put("/status/:type/:id", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
     const type = req.params.type as string;
     const id = req.params.id as string;
     const validation = statusUpdateSchema.safeParse(req.body);
@@ -118,7 +120,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 4. Referrals
-  router.post("/refer", authenticate, asyncHandler(async (req, res) => {
+  router.post("/refer", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
     const validation = referSchema.safeParse(req.body);
     if (!validation.success) {
       throw new ValidationError("Invalid referral data", validation.error.format());
@@ -144,7 +146,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 6. Archiving
-  router.put("/archive/:type/:id", authenticate, asyncHandler(async (req, res) => {
+  router.put("/archive/:type/:id", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
     const type = req.params.type as string;
     const id = req.params.id as string;
     await CorrespondenceService.archive(type, id);
@@ -167,7 +169,7 @@ export const createCorrespondenceRoutes = (
     res.json(data);
   }));
 
-  router.post("/attachments", authenticate, asyncHandler(async (req, res) => {
+  router.post("/attachments", authenticate, checkPermission('Correspondence', 'Edit'), validateBody(correspondenceAttachmentSchema.passthrough()), asyncHandler(async (req, res) => {
     const userId = (req as any).user.id;
     await CorrespondenceService.addAttachment(req.body, userId);
     

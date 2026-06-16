@@ -155,6 +155,11 @@ export const TABLE_WRITE_SCHEMAS: Record<string, WriteSchema> = {
     notes: text(),
     entry_date: date(),
     entered_by: text(),
+    // `likelihood_num`/`impact_num` are the writable scoring inputs. The DB
+    // derives the score/level from them server-side, so the derived columns
+    // `risk_score_calc` and `risk_level_calc` (DB-generated, GENERATED ALWAYS
+    // ... STORED) are intentionally EXCLUDED from this writable whitelist and
+    // must never be mass-assigned through the CRUD path (finding 1.20 → 2.20).
     likelihood_num: num(),
     impact_num: num(),
   }),

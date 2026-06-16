@@ -3,6 +3,30 @@ import type { Page } from 'puppeteer';
 import type { PdfSettings } from '../types/pdf.js';
 
 /**
+ * Escapes a CSS font-family name so it cannot break out of the `<style>` block
+ * or an inline `style="..."` attribute. Strips characters that have structural
+ * meaning in CSS/HTML (quotes, angle brackets, braces, semicolons, backslashes,
+ * parentheses) leaving only safe font-name characters. (Finding 1.38 → 2.38.)
+ */
+function sanitizeCssFontName(name: unknown): string {
+  const raw = name == null ? '' : String(name);
+  const cleaned = raw.replace(/[<>{}();'"\\/]/g, '').replace(/\s+/g, ' ').trim();
+  // Fall back to a safe default if sanitizing leaves nothing usable.
+  return cleaned.length > 0 ? cleaned : 'sans-serif';
+}
+
+/**
+ * Coerces a margin/size setting to a finite, non-negative number for safe
+ * interpolation into CSS lengths. Non-numeric or hostile values collapse to 0,
+ * so a malicious setting can never inject CSS/markup. (Finding 1.38 → 2.38.)
+ */
+function sanitizeCssNumber(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+/**
  * Wraps body HTML in a full HTML document with RTL support, Arabic fonts,
  * margins, print styles, and font sizes from PDF settings.
  *
@@ -13,6 +37,10 @@ import type { PdfSettings } from '../types/pdf.js';
  *
  * Style priority rule: Settings are applied as inline styles on <body>,
  * so they take priority over template <style> blocks unless !important is used.
+ *
+ * Security: every interpolated setting (font name, font sizes, margins) is
+ * sanitized before being written into the `<style>` block / inline style so a
+ * crafted setting value cannot break out of the CSS context (Finding 1.38 → 2.38).
  */
 export function wrapWithStyles(
   bodyHtml: string,
@@ -21,9 +49,20 @@ export function wrapWithStyles(
 ): string {
   const isRtl = language === 'ar' || settings.rtl_enabled;
   const dir = isRtl ? 'rtl' : 'ltr';
+  const safeFontName = sanitizeCssFontName(settings.arabic_font_name);
   const fontFamily = isRtl
-    ? `'${settings.arabic_font_name}', Tahoma, 'Amiri', sans-serif`
-    : `'${settings.arabic_font_name}', sans-serif`;
+    ? `'${safeFontName}', Tahoma, 'Amiri', sans-serif`
+    : `'${safeFontName}', sans-serif`;
+
+  // Sanitize all numeric style inputs to finite, non-negative numbers.
+  const arabicFontSize = sanitizeCssNumber(settings.arabic_font_size);
+  const headingFontSize = sanitizeCssNumber(settings.heading_font_size);
+  const subheadingFontSize = sanitizeCssNumber(settings.subheading_font_size);
+  const tableFontSize = sanitizeCssNumber(settings.table_font_size);
+  const marginTop = sanitizeCssNumber(settings.margin_top);
+  const marginRight = sanitizeCssNumber(settings.margin_right);
+  const marginBottom = sanitizeCssNumber(settings.margin_bottom);
+  const marginLeft = sanitizeCssNumber(settings.margin_left);
 
   return `<!DOCTYPE html>
 <html lang="${language}" dir="${dir}">
@@ -46,23 +85,23 @@ export function wrapWithStyles(
 
     body {
       font-family: ${fontFamily};
-      font-size: ${settings.arabic_font_size}pt;
+      font-size: ${arabicFontSize}pt;
       direction: ${dir};
       margin: 0;
-      padding: ${settings.margin_top}mm ${settings.margin_right}mm ${settings.margin_bottom}mm ${settings.margin_left}mm;
+      padding: ${marginTop}mm ${marginRight}mm ${marginBottom}mm ${marginLeft}mm;
       line-height: 1.6;
     }
 
     h1, h2, h3 {
-      font-size: ${settings.heading_font_size}pt;
+      font-size: ${headingFontSize}pt;
     }
 
     h4, h5, h6 {
-      font-size: ${settings.subheading_font_size}pt;
+      font-size: ${subheadingFontSize}pt;
     }
 
     table {
-      font-size: ${settings.table_font_size}pt;
+      font-size: ${tableFontSize}pt;
       width: 100%;
       border-collapse: collapse;
     }
@@ -104,7 +143,7 @@ export function wrapWithStyles(
     }
   </style>
 </head>
-<body dir="${dir}" style="font-family: ${fontFamily}; font-size: ${settings.arabic_font_size}pt; direction: ${dir}; margin: 0; padding: ${settings.margin_top}mm ${settings.margin_right}mm ${settings.margin_bottom}mm ${settings.margin_left}mm;">
+<body dir="${dir}" style="font-family: ${fontFamily}; font-size: ${arabicFontSize}pt; direction: ${dir}; margin: 0; padding: ${marginTop}mm ${marginRight}mm ${marginBottom}mm ${marginLeft}mm;">
   ${bodyHtml}
 </body>
 </html>`;

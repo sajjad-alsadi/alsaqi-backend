@@ -1,25 +1,25 @@
 import { BaseService } from './BaseService';
 
+/**
+ * RiskService — risk_register CRUD.
+ *
+ * Finding 1.20 → 2.20: `risk_score_calc` and `risk_level_calc` are DB-managed
+ * derived columns (computed server-side from `likelihood_num` * `impact_num`).
+ * They are intentionally NOT part of the `risk_register` write-schema whitelist
+ * (see `columnWhitelist.ts`), so injecting them into the create/update body made
+ * `checkWhitelist` reject the entire request and broke risk create/update.
+ *
+ * The fix is to NOT inject those derived columns into the data passed to
+ * `BaseService.create/update`: the database derives them from the writable
+ * `likelihood_num`/`impact_num` inputs. This keeps the whitelist check passing
+ * while preserving correct, server-computed risk scoring.
+ */
 export class RiskService extends BaseService {
-  static computeRiskScore(data: any) {
-    if (data.likelihood_num !== undefined && data.impact_num !== undefined) {
-      data.risk_score_calc = data.likelihood_num * data.impact_num;
-      const score = data.risk_score_calc;
-      data.risk_level_calc = score >= 20 ? 'critical' : score >= 8 ? 'high' : score >= 4 ? 'medium' : score >= 2 ? 'low' : 'negligible';
-    }
-  }
-
   static async create(tableName: string, data: any) {
-    if (tableName === 'risk_register') {
-      this.computeRiskScore(data);
-    }
     return super.create(tableName, data);
   }
 
   static async update(tableName: string, id: string | number, data: any) {
-    if (tableName === 'risk_register') {
-      this.computeRiskScore(data);
-    }
     return super.update(tableName, id, data);
   }
 }

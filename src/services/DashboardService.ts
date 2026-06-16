@@ -20,22 +20,28 @@ export class DashboardService {
     const mappedDept = isFiltered ? (deptMap[department!.toLowerCase()] || department) : null;
 
     // Plans Builder
-    const auditQb = new QueryBuilder("FROM audit_plans").whereIf(isFiltered, "type = ?", mappedDept);
+    const auditQb = new QueryBuilder("FROM audit_plans")
+      .where("deleted_at IS NULL")
+      .whereIf(isFiltered, "type = ?", mappedDept);
     
     // Findings Builder
     const findingsBase = isFiltered ? "FROM audit_findings f JOIN audit_plans p ON f.audit_id = p.id" : "FROM audit_findings f";
     const findingsQb = new QueryBuilder(findingsBase)
+      .where("f.deleted_at IS NULL")
       .whereIf(isFiltered, "p.type = ?", mappedDept)
       .whereIf(!!riskLevel, "f.risk_level = ?", riskLevel);
       
     // Recommendations Builder
     const recBase = isFiltered ? "FROM recommendations r JOIN audit_findings f ON r.finding_id = f.id JOIN audit_plans p ON f.audit_id = p.id" : "FROM recommendations r";
     const recQb = new QueryBuilder(recBase)
+      .where("r.deleted_at IS NULL")
       .whereIf(isFiltered, "p.type = ?", mappedDept)
       .whereIf(!!riskLevel, "r.risk_level = ?", riskLevel);
       
     // Risk Builder
-    const riskQb = new QueryBuilder("FROM risk_register").whereIf(isFiltered, "type = ?", mappedDept);
+    const riskQb = new QueryBuilder("FROM risk_register")
+      .where("deleted_at IS NULL")
+      .whereIf(isFiltered, "type = ?", mappedDept);
 
     // Compliance Builder
     const complianceQb = new QueryBuilder("FROM central_bank_instructions")
@@ -78,9 +84,9 @@ export class DashboardService {
         ) t) as risks_by_level,
 
         (SELECT json_build_object(
-          'incoming_total', (SELECT COUNT(*) FROM incoming_correspondence),
-          'outgoing_total', (SELECT COUNT(*) FROM outgoing_letters),
-          'pending_responses', (SELECT COUNT(*) FROM incoming_correspondence WHERE response_required = 1 AND status != 'Closed')
+          'incoming_total', (SELECT COUNT(*) FROM incoming_correspondence WHERE deleted_at IS NULL),
+          'outgoing_total', (SELECT COUNT(*) FROM outgoing_letters WHERE deleted_at IS NULL),
+          'pending_responses', (SELECT COUNT(*) FROM incoming_correspondence WHERE response_required = 1 AND status != 'Closed' AND deleted_at IS NULL)
         )) as corr_stats,
 
         (SELECT COUNT(*) ${complianceQb.buildCountQuery()}) as compliance_count,
@@ -95,6 +101,7 @@ export class DashboardService {
             COUNT(*) as planned,
             COALESCE(SUM(CASE WHEN status = 'Closed' THEN 1 ELSE 0 END), 0) as completed
           FROM audit_plans
+          WHERE deleted_at IS NULL
           GROUP BY type
         ) t) as audit_progress
     `;
@@ -158,12 +165,12 @@ export class DashboardService {
              p.title as plan_title
       FROM audit_tasks t
       LEFT JOIN audit_plans p ON t.plan_id = p.id
-      WHERE t.assigned_to = ?
+      WHERE t.assigned_to = ? AND t.deleted_at IS NULL
       ORDER BY t.created_at DESC
       LIMIT ? OFFSET ?
     `;
     
-    const countQuery = "SELECT COUNT(*) as total FROM audit_tasks WHERE assigned_to = ?";
+    const countQuery = "SELECT COUNT(*) as total FROM audit_tasks WHERE assigned_to = ? AND deleted_at IS NULL";
 
     const [data, countRes] = await Promise.all([
       this.db.prepare(query).all(userId, pageSize, offset),

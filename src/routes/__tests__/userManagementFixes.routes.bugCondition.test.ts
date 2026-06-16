@@ -208,7 +208,7 @@ describe('Property 1: Bug Condition exploration — auth routes (user-management
     const app = express();
     app.use(express.json());
     app.use(cookieParser());
-    app.use('/auth', createTwoFactorRoutes('PUB', 'PUB', 'PRIV', (_q: any, _r: any, n: any) => n(), vi.fn()));
+    app.use('/auth', createTwoFactorRoutes('PUB', 'PUB', 'PRIV', (_q: any, _r: any, n: any) => n(), (_q: any, _r: any, n: any) => n(), vi.fn()));
 
     const res = await request(app)
       .post('/auth/2fa/validate')

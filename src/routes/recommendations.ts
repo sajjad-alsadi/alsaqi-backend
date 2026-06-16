@@ -7,12 +7,13 @@ import { methodNotAllowed } from '../utils/routeRegistry';
 export const createRecommendationRoutes = (
   db: any,
   authenticate: any,
+  checkPermission: any,
   logError: any
 ) => {
   const router = express.Router();
 
   // GET /recommendations - List recommendations with filter query params
-  router.get('/', authenticate, asyncHandler(async (req, res) => {
+  router.get('/', authenticate, checkPermission('Recommendations', 'View'), asyncHandler(async (req, res) => {
     const filters = {
       department: req.query.department as string | undefined,
       plan_id: req.query.plan_id as string | undefined,
@@ -33,7 +34,7 @@ export const createRecommendationRoutes = (
     );
   }));
 
-  router.patch('/:id/resolve', authenticate, asyncHandler(async (req, res) => {
+  router.patch('/:id/resolve', authenticate, checkPermission('Recommendations', 'Edit'), asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { closure_evidence_path } = req.body;
     
@@ -57,7 +58,9 @@ export const createRecommendationRoutes = (
       res.json({ success: true });
     } catch (err: any) {
       logError(err, 'PATCH', req.originalUrl, req.ip, userId);
-      res.status(500).json({ success: false, error: { message: err.message, code: 'INTERNAL_ERROR' } });
+      // Forward to the global error handler so the response is sanitized
+      // (never leak raw err.message).
+      throw err;
     }
   }));
 

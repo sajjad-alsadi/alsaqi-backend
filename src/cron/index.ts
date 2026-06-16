@@ -11,6 +11,12 @@ import { partitionManager } from '../services/PartitionManager';
 const BATCH_SIZE = 500;
 
 /**
+ * Handle to the daily automation cron task, retained so graceful shutdown can
+ * stop it (Finding 1.2 → 2.2). `null` until startAutomationJobs() runs.
+ */
+let dailyAutomationTask: ReturnType<typeof cron.schedule> | null = null;
+
+/**
  * Process an array in batches of BATCH_SIZE, applying the given async function to each batch.
  */
 async function processBatches<T, R>(items: T[], batchFn: (batch: T[]) => Promise<R[]>): Promise<R[]> {
@@ -107,7 +113,7 @@ export const startAutomationJobs = () => {
 
   // Run every day at midnight (0 0 * * *)
   // For testing purposes, we could run it more frequently, but daily is standard.
-  cron.schedule('0 0 * * *', async () => {
+  dailyAutomationTask = cron.schedule('0 0 * * *', async () => {
     logger.info('[CRON] Running daily automation tasks...');
     try {
       await runDailyAutomations();
@@ -137,6 +143,25 @@ export const startAutomationJobs = () => {
   checkUpcomingDeadlines().catch(err => {
     logger.error('[CRON] Error running initial deadline checks:', err);
   });
+};
+
+/**
+ * Stop all scheduled automation jobs and the backup scheduler.
+ *
+ * Used by the graceful-shutdown path (Finding 1.2 → 2.2) so cron timers and the
+ * backup schedule do not keep firing (or hold the event loop open) while the
+ * process is draining and exiting.
+ */
+export const stopAutomationJobs = () => {
+  logger.info('[CRON] Stopping automation jobs...');
+
+  if (dailyAutomationTask) {
+    dailyAutomationTask.stop();
+    dailyAutomationTask = null;
+  }
+
+  // Stop the daily backup schedule started by startAutomationJobs().
+  backupScheduler.stop();
 };
 
 const runDailyAutomations = async () => {

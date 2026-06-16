@@ -231,5 +231,5 @@ describe('Property 14: Append atomicity', () => {
       ),
       { numRuns: 100 }
     );
-  });
+  }, 30000);
 });

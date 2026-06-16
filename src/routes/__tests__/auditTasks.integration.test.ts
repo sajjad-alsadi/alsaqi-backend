@@ -37,6 +37,7 @@ vi.mock('../../services/NotificationService', () => ({
 }));
 
 import { createAuditTaskRoutes } from '../auditTasks';
+import { globalErrorHandler } from '../../middleware/error';
 
 function createAuditTaskTestApp(options?: {
   authenticatedRole?: string;
@@ -83,8 +84,11 @@ function createAuditTaskTestApp(options?: {
 
   const logError = vi.fn();
 
-  const router = createAuditTaskRoutes(mockDb, authenticate, logError);
+  const checkPermission = () => (_req: any, _res: any, next: any) => next();
+
+  const router = createAuditTaskRoutes(mockDb, authenticate, checkPermission, logError);
   app.use('/api/audit-tasks', router);
+  app.use(globalErrorHandler);
 
   return { app, mockDb, logError };
 }

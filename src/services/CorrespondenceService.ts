@@ -2,6 +2,7 @@ import { db } from '../db/index';
 import { NotFoundError, ValidationError } from '../utils/errors';
 import { QueryBuilder } from '../utils/QueryBuilder';
 import { N8nService } from '../utils/n8nService';
+import { NumberingService } from './NumberingService';
 import { computePaginationMeta } from '../utils/paginationService';
 
 export class CorrespondenceService {
@@ -59,12 +60,11 @@ export class CorrespondenceService {
     } = data;
 
     const year = new Date().getFullYear();
-    const last = await this.db.prepare("SELECT sequence_number FROM incoming_correspondence WHERE sequence_number LIKE ? ORDER BY id DESC LIMIT 1").get(`INC-${year}-%`) as any;
-    let nextNum = 1;
-    if (last) {
-      const parts = last.sequence_number.split('-');
-      nextNum = parseInt(parts[parts.length - 1]) + 1;
-    }
+    // Atomic, race-free numbering via UPSERT RETURNING (finding 1.19 → 2.19).
+    // The previous approach selected the latest row by descending UUID id
+    // (arbitrary, non-monotonic) and was non-atomic, so concurrent inserts could
+    // duplicate a sequence number. `NumberingService.nextCounter` is atomic.
+    const nextNum = await NumberingService.nextCounter('correspondence_incoming', String(year));
     const sequence_number = `INC-${year}-${nextNum.toString().padStart(4, '0')}`;
 
     const result = await this.db.prepare(`
@@ -96,8 +96,11 @@ export class CorrespondenceService {
 
   static async updateStatus(type: string, id: string | number, newStatus: string, notes: string, userId: string | number) {
     const table = this.db.validateIdentifier(type === 'Outgoing' ? 'outgoing_letters' : 'incoming_correspondence');
-    
-    return await this.db.transaction(async () => {
+
+    // Captured inside the transaction for the post-commit webhook dispatch.
+    let oldStatus: any = null;
+
+    await this.db.transaction(async () => {
       const oldRecord = await this.db.prepare(`SELECT status FROM ${table} WHERE id = ?`).get(id);
       if (!oldRecord) throw new NotFoundError("Record not found");
 
@@ -108,17 +111,25 @@ export class CorrespondenceService {
         VALUES (?::uuid, ?::text, ?::text, ?::text, ?::uuid, ?::text)
       `).run(id, type, oldRecord.status, newStatus, userId, notes);
 
-      // --- AUTOMATION: Send event to n8n ---
+      oldStatus = oldRecord.status;
+    });
+
+    // --- AUTOMATION: Send event to n8n (after commit, outside transaction) ---
+    // External webhooks must never run inside the DB transaction, and a webhook
+    // failure must not roll back the already-committed update (finding 1.14 → 2.14).
+    try {
       await N8nService.sendEvent('correspondence.status_changed', {
         id,
         type,
-        oldStatus: oldRecord.status,
+        oldStatus,
         newStatus,
         changedBy: userId
       });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch correspondence.status_changed event:', err);
+    }
 
-      return { oldStatus: oldRecord.status };
-    });
+    return { oldStatus };
   }
 
   static async refer(data: any, userId: string | number) {
@@ -298,12 +309,9 @@ export class CorrespondenceService {
     
     // Auto-generate sequence number: OUT-YYYY-NNNN
     const year = new Date().getFullYear();
-    const last = await this.db.prepare("SELECT sequence_number FROM outgoing_letters WHERE sequence_number LIKE ? ORDER BY id DESC LIMIT 1").get(`OUT-${year}-%`) as any;
-    let nextNum = 1;
-    if (last) {
-      const parts = last.sequence_number.split('-');
-      nextNum = parseInt(parts[parts.length - 1]) + 1;
-    }
+    // Atomic, race-free numbering via UPSERT RETURNING (finding 1.19 → 2.19),
+    // replacing the previous non-atomic ordering by descending UUID id.
+    const nextNum = await NumberingService.nextCounter('correspondence_outgoing', String(year));
     const sequence_number = `OUT-${year}-${nextNum.toString().padStart(4, '0')}`;
 
     const stmt = this.db.prepare(`
@@ -348,7 +356,10 @@ export class CorrespondenceService {
   }
 
   static async deleteOutgoing(id: string | number) {
-    await this.db.prepare("DELETE FROM outgoing_letters WHERE id = ?").run(id);
+    // Soft-delete on the soft-delete table instead of hard-deleting (finding
+    // 1.32 → 2.32). `outgoing_letters` carries a `deleted_at` column; mark the
+    // row deleted rather than physically removing it.
+    await this.db.prepare("UPDATE outgoing_letters SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?::uuid AND deleted_at IS NULL").run(id);
 
     // --- AUTOMATION: Send event to n8n ---
     await N8nService.sendEvent('outgoing_correspondence.deleted', {
@@ -388,14 +399,15 @@ export class CorrespondenceService {
   }
 
   static async deleteIncoming(id: string | number) {
-    // Cleanup related records first
+    // Soft-delete on the soft-delete tables instead of hard-deleting (finding
+    // 1.32 → 2.32). `incoming_correspondence` and `correspondence_attachments`
+    // both carry a `deleted_at` column, so mark them deleted rather than
+    // physically removing them. Related rows in non-soft-delete tables
+    // (referrals/links/status history) are preserved alongside the soft-deleted
+    // parent for auditability.
     await this.db.transaction(async () => {
-      await this.db.prepare("DELETE FROM correspondence_attachments WHERE correspondence_type = 'Incoming' AND correspondence_id = ?").run(id);
-      await this.db.prepare("DELETE FROM correspondence_referrals WHERE incoming_id = ?").run(id);
-      await this.db.prepare("DELETE FROM correspondence_links WHERE incoming_id = ?").run(id);
-      await this.db.prepare("DELETE FROM correspondence_status_history WHERE correspondence_type = 'Incoming' AND correspondence_id = ?").run(id);
-      
-      await this.db.prepare("DELETE FROM incoming_correspondence WHERE id = ?").run(id);
+      await this.db.prepare("UPDATE correspondence_attachments SET deleted_at = CURRENT_TIMESTAMP WHERE correspondence_type = 'Incoming' AND correspondence_id = ? AND deleted_at IS NULL").run(id);
+      await this.db.prepare("UPDATE incoming_correspondence SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
     });
 
     // --- AUTOMATION: Send event to n8n ---

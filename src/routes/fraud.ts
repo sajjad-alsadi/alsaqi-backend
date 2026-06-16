@@ -35,7 +35,7 @@ export const createFraudRoutes = (db: any, authenticate: any, checkPermission: a
     const requestId = await FraudService.createRequest(userId, userName, reason);
 
     // Notify Admins/Managers in Parallel (Fixing Sequential Awaiting Delay)
-    const admins = await db.prepare(`SELECT id FROM users WHERE role IN ('${UserRole.ADMIN}', '${UserRole.MANAGER}')`).all() as { id: number }[];
+    const admins = await db.prepare(`SELECT id FROM users WHERE role IN (?, ?)`).all(UserRole.ADMIN, UserRole.MANAGER) as { id: number }[];
     
     await Promise.all(
       admins.map(admin => 

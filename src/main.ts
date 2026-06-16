@@ -153,8 +153,91 @@ function closeWebSocketClients(): void {
 }
 
 function handleShutdownSignal(signal: string): void {
+  void shutdownSequence(signal);
+}
+
+/**
+ * Full graceful-shutdown sequence (Finding 1.2 → 2.2).
+ *
+ * On a shutdown signal the process stops accepting new work and drains every
+ * background subsystem within the bounded SHUTDOWN_DRAIN_TIMEOUT_MS budget:
+ *   1. ApiServer.stop()        — stop the HTTP listener + close WebSocket clients
+ *   2. stopAutomationJobs()    — stop cron timers + the backup scheduler
+ *   3. queueManager.shutdown() — drain BullMQ workers/queues (waits for active jobs)
+ *   4. redisManager.disconnect() — close the Redis connection
+ *   5. pg pool.end()           — drain and close the PostgreSQL connection pool
+ *
+ * The HTTP drain + process exit is then handed to createGracefulShutdown, which
+ * exits 0 on a clean drain or non-zero if its own timeout elapses (Requirement 23).
+ */
+async function shutdownSequence(signal: string): Promise<void> {
   closeWebSocketClients();
-  void gracefulShutdown(signal);
+
+  const drainTimeoutMs = getShutdownDrainTimeoutMs();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      console.error(
+        `[shutdown] infrastructure drain exceeded ${drainTimeoutMs}ms; proceeding to exit.`
+      );
+      resolve();
+    }, drainTimeoutMs);
+    timer.unref();
+  });
+
+  const drain = (async () => {
+    // 1. Stop the API server (stops accepting connections, closes WebSocket clients).
+    try {
+      await server.stop();
+    } catch (err) {
+      console.error('[shutdown] ApiServer.stop() failed:', err);
+    }
+
+    // 2. Stop scheduled cron jobs and the backup scheduler.
+    try {
+      const { stopAutomationJobs } = await import('./cron/index.js');
+      stopAutomationJobs();
+    } catch (err) {
+      console.error('[shutdown] Failed to stop cron/backup jobs:', err);
+    }
+
+    // 3. Drain background job queues (waits for active jobs to complete).
+    try {
+      const { queueManager } = await import('./queues/queueManager.js');
+      await queueManager.shutdown();
+    } catch (err) {
+      console.error('[shutdown] queueManager.shutdown() failed:', err);
+    }
+
+    // 4. Disconnect from Redis.
+    try {
+      const { redisManager } = await import('./cache/redisManager.js');
+      await redisManager.disconnect();
+    } catch (err) {
+      console.error('[shutdown] redisManager.disconnect() failed:', err);
+    }
+
+    // 5. End the PostgreSQL connection pool.
+    try {
+      const { getPool } = await import('./db/index.js');
+      const pool = getPool();
+      if (pool) {
+        await pool.end();
+      }
+    } catch (err) {
+      console.error('[shutdown] pg pool.end() failed:', err);
+    }
+  })();
+
+  // Bound the infrastructure drain by the configured drain timeout.
+  await Promise.race([drain, deadline]);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
+
+  // Hand the HTTP drain + process exit to the Requirement-23 graceful shutdown.
+  await gracefulShutdown(signal);
 }
 
 process.on('SIGTERM', () => handleShutdownSignal('SIGTERM'));

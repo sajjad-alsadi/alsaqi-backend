@@ -28,7 +28,10 @@ export const createSessionRoutes = (
   router.get("/me", authenticate, asyncHandler(async (req, res) => {
     const user = (req as any).user;
     
-    // Fetch permissions from DB for the current user
+    // Fetch EFFECTIVE permissions from DB for the current user. Effective permissions =
+    // role grants UNION user allow-overrides, then SUBTRACT explicit user denies
+    // (is_allowed = 0) via the trailing EXCEPT clause so an explicit deny overrides a
+    // grant, matching PermissionService.resolvePermission semantics (finding 1.28).
     let permissions: Array<{ module: string; action: string }> = [];
     try {
       permissions = await db.prepare(`
@@ -39,7 +42,11 @@ export const createSessionRoutes = (
         SELECT p.module, p.action FROM permissions p
         JOIN user_permissions up ON p.id = up.permission_id
         WHERE up.user_id = ? AND up.is_allowed = 1
-      `).all(user.id, user.id) as Array<{ module: string; action: string }>;
+        EXCEPT
+        SELECT p.module, p.action FROM permissions p
+        JOIN user_permissions up ON p.id = up.permission_id
+        WHERE up.user_id = ? AND up.is_allowed = 0
+      `).all(user.id, user.id, user.id) as Array<{ module: string; action: string }>;
     } catch (e) {
       console.error("[Session] Failed to fetch permissions:", e);
     }
@@ -134,12 +141,18 @@ export const createSessionRoutes = (
 
   // WebSocket Token - issues a short-lived token for WebSocket connections
   // Since the access token is in an httpOnly cookie (not accessible from JS),
-  // the frontend calls this endpoint to get a token it can pass as a query parameter.
+  // the frontend calls this endpoint to get a dedicated ws token it passes via
+  // the Authorization header / Sec-WebSocket-Protocol subprotocol on upgrade.
   router.get("/ws-token", authenticate, asyncHandler(async (req, res) => {
     const user = (req as any).user;
+    // Embed the user's current session_version so the ws handshake can re-check
+    // it against the authoritative store and reject revoked sessions (Req 2.27).
+    const dbUser = await db.prepare(
+      "SELECT session_version FROM users WHERE id = ?"
+    ).get(user.id) as any;
     const jwt = await import('jsonwebtoken');
     const wsToken = jwt.default.sign(
-      { id: user.id, username: user.username, type: 'ws' },
+      { id: user.id, username: user.username, type: 'ws', session_version: dbUser?.session_version },
       JWT_PRIVATE_KEY,
       { algorithm: 'RS256', expiresIn: '30s' }
     );

@@ -6,6 +6,26 @@ import { AuthService } from '../../services/AuthService';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { ValidationError } from '../../utils/errors';
 import { DEFAULT_PASSWORD_MIN_LENGTH } from '../../services/passwordPolicy';
+import { getRefreshCookiePath } from '../../services/refreshCookiePath';
+
+/**
+ * Builds environment-aware auth cookie options.
+ *
+ * In production we need `sameSite: 'none'` + `secure: true` to support cross-origin
+ * deployments; the browser silently DROPS such a cookie over plain HTTP (dev/localhost),
+ * which previously logged developers out. In non-production we therefore fall back to
+ * `sameSite: 'lax'` + `secure: false` so the cookie is accepted over HTTP. Mirrors the
+ * pattern already used in `session.ts` (finding 1.39).
+ */
+const buildAuthCookieOptions = () => {
+  const isProduction = process.env.NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+    path: '/'
+  };
+};
 
 const forgotPasswordSchema = z.object({
   username: z.string().min(1)
@@ -102,7 +122,14 @@ export const createPasswordRoutes = (
       { algorithm: 'RS256', expiresIn: '15m' }
     );
 
-    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', path: '/' });
+    const cookieOptions = buildAuthCookieOptions();
+    // Issue a fresh access token cookie with env-aware flags.
+    res.cookie('token', token, cookieOptions);
+    // Rotate/clear the stale refresh cookie: changePassword bumps session_version and
+    // revokes outstanding refresh tokens server-side, so the browser's old refreshToken
+    // is now dead. Clear it (matching the configured refresh path) to keep client and
+    // server state consistent and force a clean re-auth when the access token expires.
+    res.clearCookie('refreshToken', { ...cookieOptions, path: getRefreshCookiePath() });
     res.json({ success: true, token });
   }));
 
@@ -125,7 +152,11 @@ export const createPasswordRoutes = (
       { algorithm: 'RS256', expiresIn: '15m' }
     );
 
-    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', path: '/' });
+    const cookieOptions = buildAuthCookieOptions();
+    res.cookie('token', token, cookieOptions);
+    // See change-password: updatePassword also revokes outstanding refresh tokens, so the
+    // browser's old refreshToken cookie is stale and is cleared here.
+    res.clearCookie('refreshToken', { ...cookieOptions, path: getRefreshCookiePath() });
     res.json({ success: true, token });
   }));
 

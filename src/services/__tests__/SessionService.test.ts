@@ -156,9 +156,16 @@ describe('SessionService', () => {
       const result = await SessionService.refresh('old-refresh-token', JWT_SECRET, JWT_PRIVATE_KEY);
 
       expect(result.rememberMe).toBe(true);
-      // Refresh token should be signed with 30d expiry
+      // Rotated refresh token now carries the identity + session_version claims so the
+      // revocation check keeps working after rotation (finding 1.4 / task 5.1); 30d expiry.
       expect(mockSign).toHaveBeenCalledWith(
-        { id: mockUser.id, rememberMe: true },
+        {
+          id: mockUser.id,
+          username: mockUser.username,
+          role: mockUser.role,
+          session_version: mockUser.session_version,
+          rememberMe: true,
+        },
         JWT_PRIVATE_KEY,
         { algorithm: 'RS256', expiresIn: '30d' }
       );
@@ -177,9 +184,16 @@ describe('SessionService', () => {
       const result = await SessionService.refresh('old-refresh-token', JWT_SECRET, JWT_PRIVATE_KEY);
 
       expect(result.rememberMe).toBe(false);
-      // Refresh token should be signed with 8h expiry
+      // Rotated refresh token now carries the identity + session_version claims so the
+      // revocation check keeps working after rotation (finding 1.4 / task 5.1); 8h expiry.
       expect(mockSign).toHaveBeenCalledWith(
-        { id: mockUser.id, rememberMe: false },
+        {
+          id: mockUser.id,
+          username: mockUser.username,
+          role: mockUser.role,
+          session_version: mockUser.session_version,
+          rememberMe: false,
+        },
         JWT_PRIVATE_KEY,
         { algorithm: 'RS256', expiresIn: '8h' }
       );
@@ -222,9 +236,16 @@ describe('SessionService', () => {
       const result = await SessionService.refresh('old-refresh-token', JWT_SECRET, JWT_PRIVATE_KEY);
 
       expect(result.rememberMe).toBe(false);
-      // Should use 8h expiry (non-rememberMe)
+      // Should use 8h expiry (non-rememberMe). Rotated refresh token carries identity +
+      // session_version claims (finding 1.4 / task 5.1).
       expect(mockSign).toHaveBeenCalledWith(
-        { id: mockUser.id, rememberMe: false },
+        {
+          id: mockUser.id,
+          username: mockUser.username,
+          role: mockUser.role,
+          session_version: mockUser.session_version,
+          rememberMe: false,
+        },
         JWT_PRIVATE_KEY,
         { algorithm: 'RS256', expiresIn: '8h' }
       );

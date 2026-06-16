@@ -55,8 +55,8 @@ export class PasswordService {
       throw new NotFoundError("Request not found");
     }
 
-    const tempPass = crypto.randomBytes(6).toString('base64url') + "!";
-    const hashedTemp = bcrypt.hashSync(tempPass, 12);
+    const tempPass = crypto.randomBytes(18).toString('base64url') + "!";
+    const hashedTemp = await bcrypt.hash(tempPass, 12);
 
     await db.prepare("UPDATE users SET password = ?::text, requires_password_change = 1, failed_attempts = 0, locked_until = NULL, session_version = session_version + 1 WHERE id = ?::uuid")
       .run(hashedTemp, request.user_id);
@@ -88,24 +88,34 @@ export class PasswordService {
     // Validate password against policy settings (shared, centralized policy)
     await validatePasswordPolicy(newPassword);
 
-    if (bcrypt.compareSync(newPassword, user.password)) {
+    if (await bcrypt.compare(newPassword, user.password)) {
       throw new ValidationError("New password cannot be the same as the current password");
     }
 
     const history = await db.prepare("SELECT password_hash FROM password_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 5").all(user.id) as { password_hash: string }[];
     
     for (const record of history) {
-      if (bcrypt.compareSync(newPassword, record.password_hash)) {
+      if (await bcrypt.compare(newPassword, record.password_hash)) {
         throw new ValidationError("Password has been used previously. Please choose a different one.");
       }
     }
 
-    const hashed = bcrypt.hashSync(newPassword, 12);
+    const hashed = await bcrypt.hash(newPassword, 12);
     
     await db.transaction(async () => {
       await db.prepare("INSERT INTO password_history (user_id, password_hash) VALUES (?::uuid, ?::text)").run(user.id, user.password);
       await db.prepare("UPDATE users SET password = ?::text, password_last_changed = CURRENT_TIMESTAMP, requires_password_change = 0, session_version = session_version + 1 WHERE id = ?::uuid").run(hashed, user.id);
     });
+    
+    // Revoke outstanding refresh credentials and terminate active sessions so prior refresh
+    // tokens can no longer be exchanged for new access tokens after a password change. Mirrors
+    // approveReset; bumping session_version alone is not enough for full session lifecycle (Req 2.4).
+    try {
+      await db.prepare("UPDATE refresh_tokens SET is_revoked = 1, revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(user.id);
+    } catch (e) {
+      // Ignore if table/columns are unavailable in this environment
+    }
+    await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE user_id = ? AND status = 'Active'").run(user.id);
     
     // Invalidate cached user data so middleware picks up new session_version
     await invalidateUserCache(user.id);
@@ -119,7 +129,7 @@ export class PasswordService {
     
     if (!user) throw new NotFoundError("User not found");
 
-    if (!bcrypt.compareSync(currentPassword, user.password)) {
+    if (!(await bcrypt.compare(currentPassword, user.password))) {
       throw new AuthError("Incorrect current password");
     }
 
@@ -133,52 +143,33 @@ export class PasswordService {
     const history = await db.prepare("SELECT password_hash FROM password_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 5").all(user.id) as { password_hash: string }[];
     
     for (const record of history) {
-      if (bcrypt.compareSync(newPassword, record.password_hash)) {
+      if (await bcrypt.compare(newPassword, record.password_hash)) {
         throw new ValidationError("Password has been used previously. Please choose a different one.");
       }
     }
 
-    const hashed = bcrypt.hashSync(newPassword, 12);
+    const hashed = await bcrypt.hash(newPassword, 12);
     
     await db.transaction(async () => {
       await db.prepare("INSERT INTO password_history (user_id, password_hash) VALUES (?::uuid, ?::text)").run(user.id, user.password);
       await db.prepare("UPDATE users SET password = ?::text, password_last_changed = CURRENT_TIMESTAMP, requires_password_change = 0, session_version = session_version + 1 WHERE id = ?::uuid").run(hashed, user.id);
     });
     
+    // Revoke outstanding refresh credentials and terminate active sessions so prior refresh
+    // tokens can no longer be exchanged for new access tokens after a password change. Mirrors
+    // approveReset; bumping session_version alone is not enough for full session lifecycle (Req 2.4).
+    try {
+      await db.prepare("UPDATE refresh_tokens SET is_revoked = 1, revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(user.id);
+    } catch (e) {
+      // Ignore if table/columns are unavailable in this environment
+    }
+    await db.prepare("UPDATE user_sessions SET status = 'Terminated' WHERE user_id = ? AND status = 'Active'").run(user.id);
+    
     // Invalidate cached user data so middleware picks up new session_version
     await invalidateUserCache(user.id);
     
     const updatedUser = await db.prepare("SELECT id, username, role, session_version FROM users WHERE id = ?").get(user.id) as any;
     return updatedUser;
-  }
-
-  /** Validate password against system policy settings */
-  private static async validatePasswordPolicy(password: string) {
-    try {
-      const settings = await db.prepare("SELECT password_min_length, password_require_uppercase, password_require_lowercase, password_require_numbers, password_require_symbols FROM user_management_settings WHERE id = 1").get() as any;
-      
-      if (!settings) return; // No settings, skip validation
-
-      const minLength = settings.password_min_length || 8;
-      if (password.length < minLength) {
-        throw new ValidationError(`Password must be at least ${minLength} characters`);
-      }
-      if (settings.password_require_uppercase && !/[A-Z]/.test(password)) {
-        throw new ValidationError("Password must contain at least one uppercase letter");
-      }
-      if (settings.password_require_lowercase && !/[a-z]/.test(password)) {
-        throw new ValidationError("Password must contain at least one lowercase letter");
-      }
-      if (settings.password_require_numbers && !/[0-9]/.test(password)) {
-        throw new ValidationError("Password must contain at least one number");
-      }
-      if (settings.password_require_symbols && !/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
-        throw new ValidationError("Password must contain at least one special character");
-      }
-    } catch (e) {
-      if (e instanceof ValidationError) throw e;
-      // If settings query fails, skip policy validation
-    }
   }
 
   static async getResetRequests() {

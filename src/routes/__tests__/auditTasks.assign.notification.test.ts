@@ -55,11 +55,12 @@ describe('Task Assignment Notification (Requirement 4.3)', () => {
   let router: any;
   const mockDb = { prepare: mockDbPrepare };
   const mockAuthenticate = (_req: any, _res: any, next: any) => next();
+  const mockCheckPermission = () => (_req: any, _res: any, next: any) => next();
   const mockLogError = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
-    router = createAuditTaskRoutes(mockDb, mockAuthenticate, mockLogError);
+    router = createAuditTaskRoutes(mockDb, mockAuthenticate, mockCheckPermission, mockLogError);
   });
 
   function createMockReq(params: any, body: any, user: any) {

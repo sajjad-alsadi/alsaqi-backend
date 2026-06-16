@@ -63,8 +63,13 @@ export function createResponseWrapper(options: ResponseWrapperOptions = {}) {
       const statusCode = res.statusCode;
       const requestId = (req as any).correlationId || 'unknown';
 
-      // Set response headers
-      res.setHeader('X-Request-Id', requestId);
+      // Set response headers. The correlation-ID middleware is the single
+      // authoritative setter of X-Request-Id (finding 1.40 → 2.40); only set it
+      // here as a fallback when that middleware did not run (e.g. responseWrapper
+      // used standalone), so the header is written exactly once on the normal path.
+      if (!res.hasHeader('X-Request-Id')) {
+        res.setHeader('X-Request-Id', requestId);
+      }
       res.setHeader('X-Response-Time', `${duration}ms`);
 
       // If already wrapped (has both `success` and `meta`), pass through
@@ -87,12 +92,28 @@ export function createResponseWrapper(options: ResponseWrapperOptions = {}) {
         body = bodyWithoutPagination;
       }
 
-      // Build the wrapped response
+      // Build the wrapped response.
+      //
+      // For error responses, avoid double-wrapping: if the body already carries a
+      // nested error OBJECT (e.g. `{ success: false, error: { code, message } }`),
+      // lift that inner object straight onto the canonical envelope instead of
+      // nesting it under `error.error`. Bodies where `error` is a plain message
+      // string (e.g. `{ success: false, error: 'Not found', code: 'NOT_FOUND' }`)
+      // or that are themselves the bare error object (e.g. `{ code, message }`)
+      // are used as-is, so their top-level fields remain reachable. This yields a
+      // single canonical envelope with no `error.error` nesting (Req 2.17).
+      const hasNestedErrorObject =
+        body &&
+        typeof body === 'object' &&
+        'error' in body &&
+        body.error !== null &&
+        typeof body.error === 'object';
+
       const wrapped: ApiResponse = statusCode >= 400
         ? {
             success: false,
-            data: null,
-            error: body,
+            data: body && typeof body === 'object' && 'data' in body ? body.data : null,
+            error: hasNestedErrorObject ? body.error : body,
             meta,
           }
         : {

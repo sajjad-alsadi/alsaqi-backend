@@ -150,6 +150,7 @@ export const createTwoFactorRoutes = (
   db: any,
   JWT_SECRET: string,
   JWT_PRIVATE_KEY: string,
+  authLimiter: any,
   authenticate: any,
   logError: any
 ) => {
@@ -201,7 +202,9 @@ export const createTwoFactorRoutes = (
   // ─── POST /2fa/validate ──────────────────────────────────────────────────
   // Does NOT require full auth. Uses tempToken (short-lived JWT with type='2fa_pending').
   // Validates TOTP during login flow and issues full access/refresh tokens.
-  router.post('/2fa/validate', validateBody(validateSchema), asyncHandler(async (req: any, res) => {
+  // `authLimiter` (per-source-IP, same mechanism as /login) throttles repeated guesses to
+  // prevent TOTP brute force; legitimate single attempts stay well under the limit (Req 2.9).
+  router.post('/2fa/validate', authLimiter, validateBody(validateSchema), asyncHandler(async (req: any, res) => {
     const { tempToken, token } = req.body;
 
     // Verify the temp token
@@ -273,7 +276,9 @@ export const createTwoFactorRoutes = (
   }));
   // Does NOT require full auth. Uses tempToken.
   // Accepts a backup code as alternative to TOTP during login.
-  router.post('/2fa/backup', validateBody(backupSchema), asyncHandler(async (req: any, res) => {
+  // `authLimiter` (per-source-IP, same mechanism as /login) throttles repeated guesses to
+  // prevent backup-code brute force; legitimate single attempts stay well under the limit (Req 2.9).
+  router.post('/2fa/backup', authLimiter, validateBody(backupSchema), asyncHandler(async (req: any, res) => {
     const { tempToken, code } = req.body;
 
     // Verify the temp token

@@ -1,5 +1,6 @@
 import { db } from '../db/index';
 import { NotFoundError } from '../utils/errors';
+import { AuditChainService } from './AuditChainService';
 
 export class PolicyService {
   static async getAll() {
@@ -37,8 +38,12 @@ export class PolicyService {
     const stmt = db.prepare(`INSERT INTO internal_policies (title, department, version, upload_date, file_url, status) VALUES (?, ?, ?, ?, ?, ?)`);
     const info = await stmt.run(title, department, version, new Date().toISOString().split('T')[0], file_url, status || 'Active');
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, 'Added Internal Policy', 'Governance', `Title: ${title}`);
+    await AuditChainService.append({
+      user: username,
+      action: 'Added Internal Policy',
+      module: 'Governance',
+      details: `Title: ${title}`,
+    });
       
     return { id: info.lastInsertRowid };
   }
@@ -51,8 +56,12 @@ export class PolicyService {
       const stmt = db.prepare(`UPDATE internal_policies SET title = ?, department = ?, version = ?, file_url = ?, status = ? WHERE id = ?`);
       await stmt.run(title, department, version, file_url, status, id);
       
-      await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-        .run(username, 'Updated Internal Policy', 'Governance', `ID: ${id}`);
+      await AuditChainService.append({
+        user: username,
+        action: 'Updated Internal Policy',
+        module: 'Governance',
+        details: `ID: ${id}`,
+      });
       return true;
     }
 
@@ -62,8 +71,12 @@ export class PolicyService {
       const stmt = db.prepare(`UPDATE system_policies SET content = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE policy_key = ?`);
       await stmt.run(content, username, id);
       
-      await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-        .run(username, 'Updated System Policy', 'Governance', `Key: ${id}`);
+      await AuditChainService.append({
+        user: username,
+        action: 'Updated System Policy',
+        module: 'Governance',
+        details: `Key: ${id}`,
+      });
       return true;
     }
       
@@ -77,8 +90,12 @@ export class PolicyService {
       const stmt = db.prepare(`DELETE FROM internal_policies WHERE id = ?`);
       await stmt.run(id);
       
-      await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-        .run(username, 'Deleted Internal Policy', 'Governance', `ID: ${id}`);
+      await AuditChainService.append({
+        user: username,
+        action: 'Deleted Internal Policy',
+        module: 'Governance',
+        details: `ID: ${id}`,
+      });
       return true;
     }
 
@@ -86,8 +103,12 @@ export class PolicyService {
     const stmt = db.prepare(`DELETE FROM system_policies WHERE policy_key = ?`);
     await stmt.run(id);
     
-    await db.prepare("INSERT INTO audit_trail (user, action, module, details) VALUES (?::text, ?::text, ?::text, ?::text)")
-      .run(username, 'Deleted System Policy', 'Governance', `Key: ${id}`);
+    await AuditChainService.append({
+      user: username,
+      action: 'Deleted System Policy',
+      module: 'Governance',
+      details: `Key: ${id}`,
+    });
       
     return true;
   }

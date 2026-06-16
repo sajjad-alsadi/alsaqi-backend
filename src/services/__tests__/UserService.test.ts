@@ -85,16 +85,17 @@ describe('UserService', () => {
         .mockResolvedValueOnce(null) // no existing user
         .mockResolvedValueOnce({ id: 'role-1' }) // role lookup
         .mockResolvedValueOnce({ entity_code: 'IT' }) // dept lookup
-        .mockResolvedValueOnce(null); // latest employee_id
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 'user-new-id' });
+        .mockResolvedValueOnce({ id: 'user-new-id' }); // INSERT ... RETURNING id (portable read)
+      mockAll.mockResolvedValueOnce([]); // latest employee_id list (none yet)
       mockHashSync.mockReturnValue('hashed_password_123');
 
       await UserService.createUser(userData);
 
       expect(mockHashSync).toHaveBeenCalledWith('plaintext123', 12);
-      // Verify the hashed password is passed to the INSERT statement
+      // Verify the hashed password is passed to the INSERT statement, which now reads the
+      // new id back via `RETURNING id` through get() (portable across PG/PGlite).
       // Last parameter is requires2faSetup (false for Auditor role)
-      expect(mockRun).toHaveBeenCalledWith(
+      expect(mockGet).toHaveBeenCalledWith(
         'newuser',
         'hashed_password_123',
         'New User',
@@ -120,8 +121,8 @@ describe('UserService', () => {
         .mockResolvedValueOnce(null) // no existing user
         .mockResolvedValueOnce({ id: 'role-1' }) // role lookup
         .mockResolvedValueOnce({ entity_code: 'ENG' }) // dept lookup
-        .mockResolvedValueOnce(null); // latest employee_id
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 'user-new-id' });
+        .mockResolvedValueOnce({ id: 'user-new-id' }); // INSERT ... RETURNING id (portable read)
+      mockAll.mockResolvedValueOnce([]); // latest employee_id list (none yet)
       mockHashSync.mockReturnValue('hashed_pw');
 
       const result = await UserService.createUser(userData);
@@ -146,8 +147,8 @@ describe('UserService', () => {
         .mockResolvedValueOnce(null) // no existing user
         .mockResolvedValueOnce({ id: 'role-uuid-abc' }) // role lookup returns id
         .mockResolvedValueOnce(null) // dept lookup fails
-        .mockResolvedValueOnce(null); // latest employee_id
-      mockRun.mockResolvedValueOnce({ lastInsertRowid: 'user-id' });
+        .mockResolvedValueOnce({ id: 'user-id' }); // INSERT ... RETURNING id (portable read)
+      mockAll.mockResolvedValueOnce([]); // latest employee_id list (none yet)
       mockHashSync.mockReturnValue('hashed');
 
       await UserService.createUser(userData);
@@ -156,9 +157,11 @@ describe('UserService', () => {
       expect(mockPrepare).toHaveBeenCalledWith(
         expect.stringContaining('SELECT id FROM roles WHERE name = ?')
       );
-      // The role_id (13th argument) should be the one from the role lookup
-      const insertCall = mockRun.mock.calls[0];
-      expect(insertCall[12]).toBe('role-uuid-abc');
+      // The INSERT now reads its new id via `RETURNING id` through get(); locate that
+      // get() call (the full INSERT param list) and assert role_id (13th arg).
+      const insertCall = mockGet.mock.calls.find((c: any[]) => c.length >= 13);
+      expect(insertCall).toBeDefined();
+      expect(insertCall![12]).toBe('role-uuid-abc');
     });
   });
 

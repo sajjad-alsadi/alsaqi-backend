@@ -2,6 +2,37 @@ import { db } from "./index.js";
 import { ROLES, MODULES, PERMISSIONS, DEFAULT_PERMISSIONS } from "../permissions.js";
 import { Migration } from "./migrationRunner.js";
 
+/**
+ * Distinguishes a benign "already exists" DDL error (expected on idempotent
+ * re-runs where `IF NOT EXISTS` is unavailable, e.g. ADD CONSTRAINT) from a
+ * genuine schema failure that must abort startup.
+ *
+ * Returns true only for errors that are safe to tolerate on a re-run.
+ */
+const isBenignAlreadyExistsError = (e: any): boolean => {
+  const message: string = e?.message ?? "";
+  return /already exists/i.test(message);
+};
+
+/**
+ * Base-schema bootstrap.
+ *
+ * NOTE ON THE TWO MIGRATION SYSTEMS:
+ * This project intentionally has a single tracked, versioned migration path
+ * (`MigrationRunner` + the `versionedMigrations` registry exported below).
+ * `runMigrations()` is the one-time base-schema bootstrap that brings a brand
+ * new database up to the baseline tables/indexes/seeds using idempotent DDL
+ * (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`). It is safe
+ * to re-run on every boot precisely because every statement is idempotent, but
+ * it is NOT a substitute for tracked migrations: any NEW incremental schema
+ * change must be added to `versionedMigrations` so it is recorded in
+ * `schema_migrations` and applied exactly once.
+ *
+ * Fail-fast contract: a genuine DDL failure here means the base schema could
+ * not be established, so startup MUST abort (mirroring MigrationRunner's
+ * throw-on-failure). Only benign "already exists" errors from non-`IF NOT
+ * EXISTS` statements on a re-run are tolerated (see isBenignAlreadyExistsError).
+ */
 export const runMigrations = async () => {
   // Test connection first to avoid multiple connection errors
   try {
@@ -195,7 +226,14 @@ export const runMigrations = async () => {
     try {
       await db.prepare(tableSql).run();
     } catch (e) {
+      // A failed base-schema table is fatal: the application cannot run against
+      // an incomplete schema, so abort startup (mirrors MigrationRunner).
+      // Benign "already exists" errors on an idempotent re-run are tolerated.
+      if (isBenignAlreadyExistsError(e)) {
+        continue;
+      }
       console.error("Error creating core table:", e);
+      throw e;
     }
   }
 
@@ -688,7 +726,13 @@ export const runMigrations = async () => {
     try {
       await db.prepare(tableSql).run();
     } catch (e) {
+      // A failed base-schema table is fatal: abort startup rather than running
+      // against an incomplete schema. Tolerate benign idempotent re-run errors.
+      if (isBenignAlreadyExistsError(e)) {
+        continue;
+      }
       console.error("Error creating user management table:", e);
+      throw e;
     }
   }
 
@@ -1066,6 +1110,20 @@ export const runMigrations = async () => {
       try { await db.prepare(ddl).run(); } catch (_) { /* column already exists */ }
     }
 
+    // Soft-delete support for the real outgoing-correspondence table
+    // `outgoing_letters` (finding 1.32 → 2.32). The legacy `outgoing_correspondence`
+    // table previously received these columns; the application actually writes to
+    // `outgoing_letters`, so ensure the soft-delete columns exist there too. Run
+    // idempotently every boot so already-provisioned databases pick them up.
+    const outgoingLettersSoftDelete = [
+      `ALTER TABLE outgoing_letters ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
+      `ALTER TABLE outgoing_letters ADD COLUMN IF NOT EXISTS deleted_by UUID`,
+      `CREATE INDEX IF NOT EXISTS idx_outgoing_letters_deleted_at ON outgoing_letters(deleted_at)`,
+    ];
+    for (const ddl of outgoingLettersSoftDelete) {
+      try { await db.prepare(ddl).run(); } catch (_) { /* column/index already exists */ }
+    }
+
     // Ensure the unified compliance_status CHECK constraint exists even when the
     // table was created from the older, unconstrained definition above. Check the
     // catalog first (Postgres has no ADD CONSTRAINT IF NOT EXISTS) so idempotent
@@ -1426,7 +1484,7 @@ export const versionedMigrations: Migration[] = [
         'audit_reports',
         'fraud_log',
         'incoming_correspondence',
-        'outgoing_correspondence',
+        'outgoing_letters',
         'correspondence_attachments',
       ];
 

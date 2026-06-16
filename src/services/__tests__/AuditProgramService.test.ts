@@ -21,17 +21,49 @@ vi.mock('../NotificationService', () => ({
   },
 }));
 
+// Mock PermissionService. Task 4.5 authorizes the approveProgram APPROVE gate
+// against the user's EFFECTIVE DB permissions via
+// PermissionService.getUserPermissions(userId) rather than the static
+// DEFAULT_PERMISSIONS map. Mocking it here keeps the sequential `db` mock in
+// sync (the real service would issue several extra db.prepare reads) and lets
+// each scenario declare whether APPROVE is effectively granted.
+vi.mock('../PermissionService', () => ({
+  PermissionService: {
+    getUserPermissions: vi.fn(),
+  },
+}));
+
 import { AuditProgramService } from '../AuditProgramService';
 import { NotificationService } from '../NotificationService';
+import { PermissionService } from '../PermissionService';
 import { db } from '../../db/index';
 import { ForbiddenError, ValidationError, NotFoundError } from '../../utils/errors';
 import { UserRole } from '@alsaqi/shared';
+import { MODULES, PERMISSIONS } from '../../permissions.js';
+
+/** Build an effective-permission set granting the given audit-program actions. */
+function effectiveProgramPermissions(actions: string[]) {
+  return {
+    userId: 'user-uuid-456',
+    role: 'Test',
+    roleId: 'role-1',
+    isCustomRole: false,
+    permissions: { [MODULES.AUDIT_PROGRAM_LIBRARY]: actions },
+    overrides: [],
+  } as any;
+}
 
 describe('AuditProgramService', () => {
   const mockDb = db as any;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: user has APPROVE on the audit program library (overridden
+    // per-test where a forbidden scenario is exercised). Only consulted by
+    // approveProgram.
+    (PermissionService.getUserPermissions as any).mockResolvedValue(
+      effectiveProgramPermissions([PERMISSIONS.APPROVE])
+    );
   });
 
   describe('createProgram', () => {
@@ -387,30 +419,35 @@ describe('AuditProgramService', () => {
     // === Permission validation tests ===
 
     it('should throw ForbiddenError when user role is Internal Auditor (no APPROVE permission)', async () => {
+      (PermissionService.getUserPermissions as any).mockResolvedValueOnce(effectiveProgramPermissions([]));
       await expect(
         AuditProgramService.approveProgram(programId, userId, UserRole.INTERNAL_AUDITOR)
       ).rejects.toThrow(ForbiddenError);
     });
 
     it('should throw ForbiddenError when user role is Viewer', async () => {
+      (PermissionService.getUserPermissions as any).mockResolvedValueOnce(effectiveProgramPermissions([]));
       await expect(
         AuditProgramService.approveProgram(programId, userId, UserRole.VIEWER)
       ).rejects.toThrow(ForbiddenError);
     });
 
     it('should throw ForbiddenError when user role is Compliance Officer', async () => {
+      (PermissionService.getUserPermissions as any).mockResolvedValueOnce(effectiveProgramPermissions([]));
       await expect(
         AuditProgramService.approveProgram(programId, userId, UserRole.COMPLIANCE_OFFICER)
       ).rejects.toThrow(ForbiddenError);
     });
 
     it('should throw ForbiddenError when user role is Risk Officer', async () => {
+      (PermissionService.getUserPermissions as any).mockResolvedValueOnce(effectiveProgramPermissions([]));
       await expect(
         AuditProgramService.approveProgram(programId, userId, UserRole.RISK_OFFICER)
       ).rejects.toThrow(ForbiddenError);
     });
 
     it('should throw ForbiddenError with descriptive message when user lacks permission', async () => {
+      (PermissionService.getUserPermissions as any).mockResolvedValueOnce(effectiveProgramPermissions([]));
       try {
         await AuditProgramService.approveProgram(programId, userId, UserRole.INTERNAL_AUDITOR);
         expect.fail('Should have thrown');

@@ -17,6 +17,7 @@ const ALLOWED_FIELDS = [
 export const createAuditTaskRoutes = (
   db: any,
   authenticate: any,
+  checkPermission: any,
   logError: any
 ) => {
   const router = express.Router();
@@ -24,7 +25,7 @@ export const createAuditTaskRoutes = (
   // ─── Custom Operations (must be before /:id to prevent matching) ──────────
 
   // PATCH /:id/status — Status transitions
-  router.patch('/:id/status', authenticate, asyncHandler(async (req, res) => {
+  router.patch('/:id/status', authenticate, checkPermission('AuditTasks', 'Edit'), asyncHandler(async (req, res) => {
     const id = String(req.params.id);
     const { status } = req.body;
     
@@ -68,12 +69,16 @@ export const createAuditTaskRoutes = (
       res.json({ success: true, message: 'Status updated successfully' });
     } catch (err: any) {
       logError(err, 'PATCH', req.originalUrl, req.ip, userId);
-      res.status(400).json({ success: false, error: { message: err.message, code: err.code || 'BAD_REQUEST' } });
+      // Forward to the global error handler so the response is sanitized
+      // (never leak raw err.message). Preserve the historical 400 default.
+      err.statusCode = err.statusCode || 400;
+      err.errorCode = err.errorCode || err.code || 'BAD_REQUEST';
+      throw err;
     }
   }));
 
   // POST /:id/assign — Assign users to a task
-  router.post('/:id/assign', authenticate, asyncHandler(async (req, res) => {
+  router.post('/:id/assign', authenticate, checkPermission('AuditTasks', 'Edit'), asyncHandler(async (req, res) => {
     const id = String(req.params.id);
     const { userIds } = req.body;
 
@@ -123,16 +128,15 @@ export const createAuditTaskRoutes = (
       res.status(201).json({ success: true, data: result });
     } catch (err: any) {
       logError(err, 'POST', req.originalUrl, req.ip, userId);
-      const statusCode = err.statusCode || 400;
-      res.status(statusCode).json({
-        success: false,
-        error: { message: err.message, code: err.errorCode || 'BAD_REQUEST', details: err.details }
-      });
+      // Forward to the global error handler so the response is sanitized.
+      err.statusCode = err.statusCode || 400;
+      err.errorCode = err.errorCode || 'BAD_REQUEST';
+      throw err;
     }
   }));
 
   // DELETE /:id/assign/:userId — Unassign a user from a task
-  router.delete('/:id/assign/:userId', authenticate, asyncHandler(async (req, res) => {
+  router.delete('/:id/assign/:userId', authenticate, checkPermission('AuditTasks', 'Edit'), asyncHandler(async (req, res) => {
     const { id, userId: targetUserId } = req.params;
 
     const typedReq = req as any;
@@ -155,24 +159,23 @@ export const createAuditTaskRoutes = (
       res.json({ success: true, data: result });
     } catch (err: any) {
       logError(err, 'DELETE', req.originalUrl, req.ip, currentUserId);
-      const statusCode = err.statusCode || 400;
-      res.status(statusCode).json({
-        success: false,
-        error: { message: err.message, code: err.errorCode || 'BAD_REQUEST' }
-      });
+      // Forward to the global error handler so the response is sanitized.
+      err.statusCode = err.statusCode || 400;
+      err.errorCode = err.errorCode || 'BAD_REQUEST';
+      throw err;
     }
   }));
 
   // ─── CRUD Operations ────────────────────────────────────────────────────────
 
   // GET / — List all tasks
-  router.get('/', authenticate, asyncHandler(async (req, res) => {
+  router.get('/', authenticate, checkPermission('AuditTasks', 'View'), asyncHandler(async (req, res) => {
     const tasks = await AuditTaskService.getTasks(req.query);
     res.json(tasks);
   }));
 
   // POST / — Create a new task
-  router.post('/', authenticate, asyncHandler(async (req, res) => {
+  router.post('/', authenticate, checkPermission('AuditTasks', 'Create'), asyncHandler(async (req, res) => {
     const typedReq = req as any;
     const rawBody = { ...typedReq.body };
 
@@ -206,7 +209,7 @@ export const createAuditTaskRoutes = (
   }));
 
   // PUT /:id — Update a task
-  router.put('/:id', authenticate, asyncHandler(async (req, res) => {
+  router.put('/:id', authenticate, checkPermission('AuditTasks', 'Edit'), asyncHandler(async (req, res) => {
     const typedReq = req as any;
     const id = req.params.id as string;
     if (!id || id === 'undefined') {
@@ -236,7 +239,7 @@ export const createAuditTaskRoutes = (
   }));
 
   // DELETE /:id — Delete a task
-  router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
+  router.delete('/:id', authenticate, checkPermission('AuditTasks', 'Delete'), asyncHandler(async (req, res) => {
     const typedReq = req as any;
     const id = req.params.id as string;
     if (!id || id === 'undefined') {

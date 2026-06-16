@@ -77,9 +77,14 @@ export const createArchiveRoutes = (
     authenticate,
     checkPermission('AuditPlans', 'View'),
     asyncHandler(async (req, res) => {
+      // Bound the result set to prevent an unbounded SELECT * (finding 1.33 → 2.33).
+      // Optional ?limit/?offset pagination, with a sane default + clamped maximum.
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 200, 1), 500);
+      const offset = Math.max(parseInt(String(req.query.offset)) || 0, 0);
+
       const archivedPlans = await db
-        .prepare('SELECT * FROM archived_plans ORDER BY year DESC, archived_at DESC')
-        .all();
+        .prepare('SELECT * FROM archived_plans ORDER BY year DESC, archived_at DESC LIMIT ? OFFSET ?')
+        .all(limit, offset);
 
       res.json({
         success: true,

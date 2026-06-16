@@ -129,7 +129,19 @@ export class CircuitBreaker {
           `[CircuitBreaker] Attempt ${attempt}/${this._config.maxRetries} failed for event ${eventType}: ${lastError}`
         );
 
-        // If not the last attempt, wait with exponential backoff
+        // Only retry transient failures (5xx, timeouts, network errors). A
+        // non-retryable error (e.g. a 4xx client error) is a permanent rejection:
+        // retrying cannot help and it must NOT count toward opening the circuit.
+        // (Finding 1.37 → 2.37.)
+        if (!CircuitBreaker.isRetryableError(error)) {
+          logger.warn(
+            `[CircuitBreaker] Non-retryable error for event ${eventType}; not retrying: ${lastError}`
+          );
+          await this.storeInDeadLetterQueue(eventType, payload, lastError);
+          return false;
+        }
+
+        // Retryable: if not the last attempt, wait with exponential backoff.
         if (attempt < this._config.maxRetries) {
           const backoffMs = this._config.initialBackoffMs * Math.pow(2, attempt - 1);
           await this.sleep(backoffMs);
@@ -167,7 +179,10 @@ export class CircuitBreaker {
       }
     );
 
-    // Treat 5xx responses as failures
+    // Treat 5xx responses as failures. Axios rejects 5xx by default (so this
+    // throw is normally pre-empted by the axios rejection that executeRequest's
+    // caller catches and runs through isRetryableError); this guard remains as
+    // defense-in-depth in case a custom validateStatus is ever introduced.
     if (response.status >= 500) {
       throw new Error(`Server error: HTTP ${response.status}`);
     }
@@ -244,6 +259,14 @@ export class CircuitBreaker {
    */
   async performHealthProbe(): Promise<boolean> {
     if (!this._serviceUrl) return false;
+
+    // Guard against re-entry: if a probe is already in flight (state already
+    // HALF_OPEN) do not start a second one. The periodic interval can fire again
+    // before a slow probe resolves; without this guard overlapping probes would
+    // race on the circuit state. (Finding 1.37 → 2.37.)
+    if (this._state === CircuitState.HALF_OPEN) {
+      return false;
+    }
 
     try {
       this._state = CircuitState.HALF_OPEN;

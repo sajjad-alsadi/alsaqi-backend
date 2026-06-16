@@ -49,13 +49,27 @@ vi.mock('../../utils/n8nService', () => ({
   },
 }));
 
+// Mock PermissionService. Task 4.5 authorizes the Pending Approval→Closed
+// APPROVE gate against the user's EFFECTIVE DB permissions via
+// PermissionService.getUserPermissions(userId). The property only exercises
+// valid transitions with appropriately-authorized roles (Manager/Admin for the
+// approval gate), so grant APPROVE; mocking it also keeps the sequential `db`
+// mock aligned with the recommendation-sync call index the assertions rely on.
+vi.mock('../PermissionService', () => ({
+  PermissionService: {
+    getUserPermissions: vi.fn(),
+  },
+}));
+
 import {
   AuditService,
   ALLOWED_FINDING_TRANSITIONS,
   FINDING_TO_RECOMMENDATION_STATUS,
 } from '../AuditService';
 import { db } from '../../db/index';
+import { PermissionService } from '../PermissionService';
 import { UserRole } from '@alsaqi/shared';
+import { MODULES, PERMISSIONS } from '../../permissions.js';
 
 // ─── Arbitraries ─────────────────────────────────────────────────────────────
 
@@ -148,6 +162,15 @@ describe('Property 3: Finding-Recommendation status sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDb.prepare.mockReset();
+    // Grant APPROVE on audit findings for the property's authorized roles.
+    (PermissionService.getUserPermissions as any).mockResolvedValue({
+      userId: 'user',
+      role: 'Test',
+      roleId: 'role-1',
+      isCustomRole: false,
+      permissions: { [MODULES.AUDIT_FINDINGS]: [PERMISSIONS.APPROVE] },
+      overrides: [],
+    });
   });
 
   /**

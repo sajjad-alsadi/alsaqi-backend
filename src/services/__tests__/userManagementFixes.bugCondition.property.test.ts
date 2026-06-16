@@ -52,6 +52,7 @@ vi.mock('bcryptjs', () => ({
   default: {
     hashSync: vi.fn(() => 'hashed_pw'),
     compareSync: vi.fn(() => false),
+    hash: vi.fn(async () => 'hashed_pw'),
     compare: vi.fn(async () => false),
   },
 }));
@@ -423,7 +424,7 @@ describe('Property 1: Bug Condition exploration (user-management-fixes)', () => 
       if (sql.includes('SELECT id FROM users WHERE username')) return null; // no existing
       if (sql.includes('FROM roles WHERE name')) return { id: 'role-1' };
       if (sql.includes('org_entities')) return null;
-      if (sql.includes('SELECT employee_id FROM users')) return { employee_id: 'EMP-1001' }; // stale latest, same for both
+      if (sql.includes('SELECT employee_id FROM users')) return [{ employee_id: 'EMP-1001' }]; // stale latest, same for both (.all() returns an array)
       return undefined;
     };
     const base = {
@@ -434,12 +435,13 @@ describe('Property 1: Bug Condition exploration (user-management-fixes)', () => 
 
     resetDb(responder);
     await UserService.createUser({ ...base, username: 'usera' });
-    const firstInsert = dbState.log.find((e) => e.method === 'run' && /INSERT INTO users/.test(e.sql));
+    // The user INSERT now executes via .get() (RETURNING id, task 7.1), not .run().
+    const firstInsert = dbState.log.find((e) => /INSERT INTO users/.test(e.sql));
     const firstEmpId = firstInsert!.args[13];
 
     resetDb(responder);
     await UserService.createUser({ ...base, username: 'userb' });
-    const secondInsert = dbState.log.find((e) => e.method === 'run' && /INSERT INTO users/.test(e.sql));
+    const secondInsert = dbState.log.find((e) => /INSERT INTO users/.test(e.sql));
     const secondEmpId = secondInsert!.args[13];
 
     // Expected (correct): concurrent creations from the same stale read must not collide.

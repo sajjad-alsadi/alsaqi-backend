@@ -401,9 +401,9 @@ ModuleRegistry.register({
 ModuleRegistry.register({
   name: 'SystemLogs',
   label: { en: 'System Logs', ar: 'سجلات النظام' },
-  actions: ['View'],
+  actions: ['View', 'Delete'],
   defaults: {
-    [UserRole.ADMIN]: ['View'],
+    [UserRole.ADMIN]: ['View', 'Delete'],
     [UserRole.MANAGER]: [],
     [UserRole.INTERNAL_AUDITOR]: [],
     [UserRole.COMPLIANCE_OFFICER]: [],

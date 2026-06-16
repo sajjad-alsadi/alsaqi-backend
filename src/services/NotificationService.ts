@@ -209,53 +209,61 @@ export class NotificationService {
     if (targetUserIds.length === 0) return true;
 
     try {
-      // Insert ONE notification row
-      const notifResult = await db.prepare(`
-        INSERT INTO notifications (event_type, description, related_module, link, actor_id, entity_id, entity_type, data, title, status, user_id, date)
-        VALUES (?::text, ?::text, ?::text, ?::text, ${actorId ? '?::uuid' : 'NULL'}, ${entityId ? '?::uuid' : 'NULL'}, ${entityType ? '?::text' : 'NULL'}, ?::jsonb, ${title ? '?::text' : 'NULL'}, 'Unread', ?::uuid, CURRENT_TIMESTAMP)
-        RETURNING id, date
-      `).get(
-        ...[type, message, module, link,
-          ...(actorId ? [actorId] : []),
-          ...(entityId ? [entityId] : []),
-          ...(entityType ? [entityType] : []),
-          dataJson,
-          ...(title ? [title] : []),
-          targetUserIds[0] // user_id for legacy compat
-        ]
-      ) as any;
+      // Wrap the multi-step write fan-out in a single transaction so the parent
+      // notification row, every per-recipient row, and the legacy backward-compat
+      // rows are persisted atomically — a failure partway through can no longer
+      // leave a notification with only some of its recipients (finding 1.13 → 2.13).
+      const { notificationId, notificationDate } = await db.transaction(async () => {
+        // Insert ONE notification row
+        const notifResult = await db.prepare(`
+          INSERT INTO notifications (event_type, description, related_module, link, actor_id, entity_id, entity_type, data, title, status, user_id, date)
+          VALUES (?::text, ?::text, ?::text, ?::text, ${actorId ? '?::uuid' : 'NULL'}, ${entityId ? '?::uuid' : 'NULL'}, ${entityType ? '?::text' : 'NULL'}, ?::jsonb, ${title ? '?::text' : 'NULL'}, 'Unread', ?::uuid, CURRENT_TIMESTAMP)
+          RETURNING id, date
+        `).get(
+          ...[type, message, module, link,
+            ...(actorId ? [actorId] : []),
+            ...(entityId ? [entityId] : []),
+            ...(entityType ? [entityType] : []),
+            dataJson,
+            ...(title ? [title] : []),
+            targetUserIds[0] // user_id for legacy compat
+          ]
+        ) as any;
 
-      const notificationId = notifResult?.id;
-      const notificationDate = notifResult?.date;
+        const newId = notifResult?.id;
+        const newDate = notifResult?.date;
 
-      if (notificationId) {
-        // Insert recipient rows for each target user
-        for (const uid of targetUserIds) {
-          await db.prepare(
-            "INSERT INTO notification_recipients (notification_id, recipient_id) VALUES (?::uuid, ?::uuid)"
-          ).run(notificationId, uid);
+        if (newId) {
+          // Insert recipient rows for each target user
+          for (const uid of targetUserIds) {
+            await db.prepare(
+              "INSERT INTO notification_recipients (notification_id, recipient_id) VALUES (?::uuid, ?::uuid)"
+            ).run(newId, uid);
+          }
+
+          // Also insert legacy rows for remaining users (backward compat with old frontend queries)
+          // Skip first user since we already used them for the main notification row
+          for (let i = 1; i < targetUserIds.length; i++) {
+            await db.prepare(`
+              INSERT INTO notifications (event_type, description, related_module, link, actor_id, entity_id, entity_type, data, title, status, user_id, date)
+              VALUES (?::text, ?::text, ?::text, ?::text, ${actorId ? '?::uuid' : 'NULL'}, ${entityId ? '?::uuid' : 'NULL'}, ${entityType ? '?::text' : 'NULL'}, ?::jsonb, ${title ? '?::text' : 'NULL'}, 'Unread', ?::uuid, CURRENT_TIMESTAMP)
+            `).run(
+              ...[type, message, module, link,
+                ...(actorId ? [actorId] : []),
+                ...(entityId ? [entityId] : []),
+                ...(entityType ? [entityType] : []),
+                dataJson,
+                ...(title ? [title] : []),
+                targetUserIds[i]
+              ]
+            );
+          }
         }
 
-        // Also insert legacy rows for remaining users (backward compat with old frontend queries)
-        // Skip first user since we already used them for the main notification row
-        for (let i = 1; i < targetUserIds.length; i++) {
-          await db.prepare(`
-            INSERT INTO notifications (event_type, description, related_module, link, actor_id, entity_id, entity_type, data, title, status, user_id, date)
-            VALUES (?::text, ?::text, ?::text, ?::text, ${actorId ? '?::uuid' : 'NULL'}, ${entityId ? '?::uuid' : 'NULL'}, ${entityType ? '?::text' : 'NULL'}, ?::jsonb, ${title ? '?::text' : 'NULL'}, 'Unread', ?::uuid, CURRENT_TIMESTAMP)
-          `).run(
-            ...[type, message, module, link,
-              ...(actorId ? [actorId] : []),
-              ...(entityId ? [entityId] : []),
-              ...(entityType ? [entityType] : []),
-              dataJson,
-              ...(title ? [title] : []),
-              targetUserIds[i]
-            ]
-          );
-        }
-      }
+        return { notificationId: newId, notificationDate: newDate };
+      });
 
-      // Real-time WebSocket push to each target user
+      // Real-time WebSocket push to each target user (after commit)
       if (wss && targetUserIds.length > 0) {
         const payload = JSON.stringify({
           type: 'NEW_NOTIFICATION',
@@ -306,8 +314,8 @@ export class NotificationService {
   /** Get admin user IDs */
   static async getAdminIds(): Promise<string[]> {
     const admins = await db.prepare(
-      `SELECT id FROM users WHERE role = '${UserRole.ADMIN}' AND status = 'Active'`
-    ).all() as any[];
+      `SELECT id FROM users WHERE role = ? AND status = 'Active'`
+    ).all(UserRole.ADMIN) as any[];
     return admins.map((a: any) => a.id);
   }
 

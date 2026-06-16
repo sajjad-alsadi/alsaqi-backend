@@ -20,11 +20,11 @@ export interface PaginatedResponse<T> {
 
 /**
  * Extracts pagination parameters from request query.
- * Defaults: page=1, limit=25, max limit=100
+ * Defaults: page=1, limit=20, max limit=100 (unified default across the API).
  */
 export function getPaginationParams(req: Request): PaginationParams {
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
   const offset = (page - 1) * limit;
 
   return { page, limit, offset };

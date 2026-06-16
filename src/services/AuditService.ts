@@ -4,8 +4,8 @@ import { N8nService } from '../utils/n8nService';
 import { NumberingService } from './NumberingService';
 import { NotificationService } from './NotificationService';
 import { UserRole, ADMIN_ROLES } from '../constants.js';
-import { DEFAULT_PERMISSIONS, MODULES, PERMISSIONS } from '../permissions.js';
-import type { Role } from '../permissions.js';
+import { MODULES, PERMISSIONS } from '../permissions.js';
+import { PermissionService } from './PermissionService';
 
 const VALID_FINDING_TYPES = ['control_design_deficiency', 'operational_design_deficiency'] as const;
 type FindingType = typeof VALID_FINDING_TYPES[number];
@@ -48,10 +48,11 @@ export class AuditService {
                  LEFT JOIN users u ON af.created_by = u.id`;
     let countQuery = "SELECT COUNT(*) as total FROM audit_findings af";
     const args: any[] = [];
-    let whereClause = "";
+    // Always exclude soft-deleted findings (finding 1.31 → 2.31).
+    let whereClause = " WHERE af.deleted_at IS NULL";
 
     if (params.audit_id) {
-      whereClause = " WHERE af.audit_id = ?";
+      whereClause += " AND af.audit_id = ?";
       args.push(params.audit_id);
     }
 
@@ -100,9 +101,10 @@ export class AuditService {
       throw new NotFoundError('الخطة غير موجودة / Audit plan not found');
     }
 
-    // Return findings for this plan only
+    // Return findings for this plan only, excluding soft-deleted rows
+    // (finding 1.31 → 2.31).
     const findings = await db.prepare(
-      "SELECT * FROM audit_findings WHERE audit_id = ? ORDER BY created_at DESC"
+      "SELECT * FROM audit_findings WHERE audit_id = ? AND deleted_at IS NULL ORDER BY created_at DESC"
     ).all(planId) as any[];
 
     return findings;
@@ -252,7 +254,10 @@ export class AuditService {
   }
 
   static async updateFinding(id: string, body: any, userId: string) {
-    return await db.transaction(async () => {
+    // Captured inside the transaction for the post-commit webhook dispatch.
+    let updatedData: any = null;
+
+    await db.transaction(async () => {
       // Fetch the finding to check ownership
       const finding = await db.prepare(
         "SELECT id, created_by FROM audit_findings WHERE id = ?"
@@ -289,18 +294,30 @@ export class AuditService {
         await db.prepare("UPDATE recommendations SET risk_level = ? WHERE finding_id = ?").run(data.risk_level, id);
       }
 
-      // --- AUTOMATION: Send event to n8n ---
+      updatedData = data;
+    });
+
+    // --- AUTOMATION: Send event to n8n (after commit, outside transaction) ---
+    // External webhooks must never run inside the DB transaction, and a webhook
+    // failure must not roll back the already-committed update (finding 1.14 → 2.14).
+    try {
       await N8nService.sendEvent('finding.updated', {
         findingId: id,
-        updates: data
+        updates: updatedData
       });
-    });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch finding.updated event:', err);
+    }
   }
 
   static async deleteFinding(id: string) {
     return await db.transaction(async () => {
-      await db.prepare("DELETE FROM recommendations WHERE finding_id = ?").run(id);
-      await db.prepare("DELETE FROM audit_findings WHERE id = ?").run(id);
+      // Soft-delete on soft-delete tables instead of hard-deleting (finding
+      // 1.32 → 2.32). `recommendations` and `audit_findings` both carry a
+      // `deleted_at` column, so mark the rows deleted rather than physically
+      // removing them; already-deleted rows are left untouched.
+      await db.prepare("UPDATE recommendations SET deleted_at = CURRENT_TIMESTAMP WHERE finding_id = ? AND deleted_at IS NULL").run(id);
+      await db.prepare("UPDATE audit_findings SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
 
       // --- AUTOMATION: Send event to n8n ---
       await N8nService.sendEvent('finding.deleted', {
@@ -353,10 +370,14 @@ export class AuditService {
       );
     }
 
-    // 3. For Pending Approval→Closed: require APPROVE permission
+    // 3. For Pending Approval→Closed: require APPROVE permission.
+    // Authorize against the user's EFFECTIVE DB permissions (role grants + user
+    // overrides, with explicit denies subtracted) via PermissionService rather than the
+    // static DEFAULT_PERMISSIONS map, so runtime permission changes and per-user
+    // overrides are honored (finding 1.40 authz).
     if (finding.status === 'Pending Approval' && newStatus === 'Closed') {
-      const rolePermissions = DEFAULT_PERMISSIONS[userRole as Role];
-      const modulePermissions = rolePermissions?.[MODULES.AUDIT_FINDINGS] || [];
+      const effective = await PermissionService.getUserPermissions(userId);
+      const modulePermissions = effective.permissions[MODULES.AUDIT_FINDINGS] || [];
 
       if (!modulePermissions.includes(PERMISSIONS.APPROVE)) {
         throw new ForbiddenError(
@@ -366,41 +387,56 @@ export class AuditService {
       }
     }
 
-    // 4. Update finding status
-    await db.prepare(
-      "UPDATE audit_findings SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-    ).run(newStatus, findingId);
-
-    // 5. Sync recommendation status with retry logic (up to 3 attempts)
+    // 4 & 5. Update finding status and sync recommendation status atomically.
+    // Wrapping both writes in a single transaction guarantees that a partial
+    // write (finding moved but recommendations left stale, or vice versa) can
+    // never persist: if the recommendation sync ultimately fails the finding
+    // status update is rolled back too (finding 1.13 → 2.13). The webhook-free
+    // notification dispatch in step 6 stays OUTSIDE the transaction.
     const recStatus = FINDING_TO_RECOMMENDATION_STATUS[newStatus];
     let syncSuccess = true;
 
-    if (recStatus) {
-      const MAX_RETRIES = 3;
-      let lastError: Error | null = null;
+    try {
+      await db.transaction(async () => {
+        // 4. Update finding status
+        await db.prepare(
+          "UPDATE audit_findings SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        ).run(newStatus, findingId);
 
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          await db.prepare(
-            "UPDATE recommendations SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE finding_id = ?"
-          ).run(recStatus, findingId);
-          lastError = null;
-          break;
-        } catch (err) {
-          lastError = err as Error;
-          console.error(
-            `[AuditService] Recommendation sync attempt ${attempt}/${MAX_RETRIES} failed:`,
-            (err as Error)?.message
-          );
+        // 5. Sync recommendation status with retry logic (up to 3 attempts)
+        if (recStatus) {
+          const MAX_RETRIES = 3;
+          let lastError: Error | null = null;
+
+          for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+              await db.prepare(
+                "UPDATE recommendations SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE finding_id = ?"
+              ).run(recStatus, findingId);
+              lastError = null;
+              break;
+            } catch (err) {
+              lastError = err as Error;
+              console.error(
+                `[AuditService] Recommendation sync attempt ${attempt}/${MAX_RETRIES} failed:`,
+                (err as Error)?.message
+              );
+            }
+          }
+
+          if (lastError) {
+            // Propagate so the enclosing transaction rolls back the finding
+            // status update too, keeping finding and recommendations consistent.
+            throw lastError;
+          }
         }
-      }
-
-      if (lastError) {
-        syncSuccess = false;
-        console.error(
-          '[AuditService] All recommendation sync attempts failed. Finding status updated but recommendation remains at last consistent state.'
-        );
-      }
+      });
+    } catch (syncError) {
+      syncSuccess = false;
+      console.error(
+        '[AuditService] Recommendation sync failed; finding status change rolled back to preserve consistency:',
+        (syncError as Error)?.message
+      );
     }
 
     // 6. Send notification to Manager/Admin on status change

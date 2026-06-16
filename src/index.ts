@@ -9,6 +9,7 @@
 import express from 'express';
 import http from 'http';
 import cookieParser from 'cookie-parser';
+import fileUpload from 'express-fileupload';
 import { WebSocketServer } from 'ws';
 import { API_VERSION } from '@alsaqi/shared';
 
@@ -18,6 +19,7 @@ import { csrfMiddleware } from './middleware/csrf.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { apiVersionMiddleware } from './middleware/apiVersion.js';
 import { createCorrelationIdMiddleware } from './middleware/correlationId.js';
+import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 import { createResponseWrapper } from './middleware/responseWrapper.js';
 import { createCompressionMiddleware } from './middleware/compression.js';
 import { createHelmetMiddleware } from './middleware/helmet.js';
@@ -67,6 +69,27 @@ export type { SuccessOptions, ErrorOptions, PaginationInput } from './utils/resp
 export { createV1Router } from './routes/v1/index.js';
 export type { V1RouterDeps } from './routes/v1/index.js';
 
+// ─── Infrastructure Feature Flags ──────────────────────────────────────────────
+
+/**
+ * Resolves whether an optional infrastructure subsystem should be wired during
+ * startup. Each subsystem (Redis, queues, WebSocket, cron/backups, metrics) is
+ * gated behind an explicit environment flag so a fully-configured deployment
+ * boots them while constrained environments (e.g. tests) can opt out without a
+ * code change.
+ *
+ * An unset/blank flag falls back to `defaultEnabled`; an explicit
+ * `false`/`0`/`off`/`no`/`disabled` (case-insensitive) disables the subsystem,
+ * any other value enables it.
+ */
+function isFeatureEnabled(rawFlag: string | undefined, defaultEnabled: boolean): boolean {
+  if (rawFlag === undefined || rawFlag.trim() === '') {
+    return defaultEnabled;
+  }
+  const normalized = rawFlag.trim().toLowerCase();
+  return !['false', '0', 'off', 'no', 'disabled'].includes(normalized);
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 /**
@@ -85,6 +108,11 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
 
   // Track active connections for graceful shutdown
   const activeConnections = new Set<import('net').Socket>();
+
+  // Cleanup handle for the WebSocket subsystem (heartbeat interval + upgrade
+  // listener). Populated when setupWebSocket() is wired in start(); invoked by
+  // stop() so the heartbeat timer does not outlive the server.
+  let wsCleanup: (() => void) | null = null;
 
   server.on('connection', (socket) => {
     activeConnections.add(socket);
@@ -123,11 +151,38 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
   app.use(cookieParser());
 
+  // 4a. Multipart/form-data parsing (file uploads). Registered so attachment
+  //     routes (e.g. /api/correspondence/attachments, /api/compliance,
+  //     audit-finding evidence) can read req.files; without this, req.files is
+  //     always undefined and uploads silently fail (Finding 1.30 → 2.30). Kept in
+  //     memory (useTempFiles:false) so the downstream Magika deep-inspection in
+  //     saveFile still sees file.data. abortOnLimit rejects oversized uploads, and
+  //     the file-upload paths are already exempt from the 1 MB JSON body limit in
+  //     bodySizeLimit below.
+  app.use(
+    fileUpload({
+      limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB per file
+      abortOnLimit: true,
+      responseOnLimit: 'File size limit exceeded (maximum 25 MB)',
+      useTempFiles: false,
+      createParentPath: true,
+      preserveExtension: true,
+      safeFileNames: true,
+    })
+  );
+
   // 5. Body size limit enforcement
   app.use(bodySizeLimit);
 
   // 6. Correlation ID (request tracing - generates UUID v4 per request)
   app.use(createCorrelationIdMiddleware());
+
+  // 6a. Request logging (records method/path/status/duration to request_logs and
+  //     warns on slow requests). Mounted AFTER correlation ID so every log entry
+  //     carries the request's correlation ID. Excludes /api/health and /uploads/*
+  //     by default; DB persist failures degrade to stderr without affecting the
+  //     response (Finding 1.16 → 2.16).
+  app.use(requestLoggerMiddleware);
 
   // 7. X-API-Version header on all /api/ responses
   app.use('/api/', apiVersionHeader);
@@ -183,10 +238,11 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   // ─── start() ────────────────────────────────────────────────────────────────
 
   async function start(): Promise<void> {
-    // Fail-fast configuration assertion (Req 9.1, 9.2): verify the dedicated
-    // FILE_ACCESS_SECRET is present and at least 32 characters BEFORE binding the
-    // port. assertConfigured logs a fatal error and exits with a non-zero code
-    // when the secret is unset/whitespace-only or too short.
+    // Fail-fast configuration assertion (Req 9.1, 9.2, 2.11): verify the
+    // dedicated FILE_ACCESS_SECRET is present and at least 32 characters, and
+    // (in production) that FILE_ENCRYPTION_KEY and TOTP_ENCRYPTION_KEY are set,
+    // BEFORE binding the port. assertConfigured logs a fatal error and exits
+    // with a non-zero code when a required secret/key is missing or too short.
     const { SecureFileService } = await import('./services/SecureFileService.js');
     SecureFileService.assertConfigured();
 
@@ -267,6 +323,80 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
     // Must be last middleware (4 params = error handler)
     app.use(globalErrorHandler);
 
+    // ─── Infrastructure Composition (Finding 1.1 → 2.1) ──────────────────────────
+    // Wire the background infrastructure subsystems into startup so WebSockets,
+    // queues, Redis-backed rate limiting, cron/backups, and metrics all function.
+    // Each subsystem is gated behind an explicit env flag (default ON outside the
+    // test environment) so a fully-configured deployment boots them while
+    // constrained environments can intentionally opt out (Preservation 3.6, 3.11).
+    const infraDefault = config.nodeEnv !== 'test';
+
+    // Redis connection (rate limiter / cache backend). Degrades gracefully on its own.
+    if (isFeatureEnabled(process.env.ENABLE_REDIS, infraDefault)) {
+      const { redisManager } = await import('./cache/redisManager.js');
+      await redisManager.connect();
+    }
+
+    // BullMQ queues + notification/PDF queue workers.
+    if (isFeatureEnabled(process.env.ENABLE_QUEUES, infraDefault)) {
+      const { queueManager } = await import('./queues/queueManager.js');
+      await queueManager.initialize();
+
+      const { startNotificationWorker } = await import('./queues/workers/notificationWorker.js');
+      const { registerPdfWorker } = await import('./queues/workers/pdfWorker.js');
+      startNotificationWorker(queueManager);
+      registerPdfWorker();
+    }
+
+    // WebSocket server (real-time notifications + heartbeat).
+    if (isFeatureEnabled(process.env.ENABLE_WEBSOCKET, infraDefault)) {
+      const { setupWebSocket } = await import('./ws/index.js');
+      wsCleanup = setupWebSocket({
+        httpServer: server,
+        wss,
+        jwtPublicKey,
+      });
+    }
+
+    // Scheduled automation (cron) + automated backups.
+    if (isFeatureEnabled(process.env.ENABLE_CRON, infraDefault)) {
+      const { startAutomationJobs } = await import('./cron/index.js');
+      const { backupScheduler } = await import('./utils/backup.js');
+      startAutomationJobs();
+      // startAutomationJobs() already starts the backup scheduler; BackupScheduler.start()
+      // is idempotent (it stops any previous schedule first), so this explicit call keeps
+      // the daily backups running without creating a second schedule.
+      backupScheduler.start();
+    }
+
+    // Prometheus metrics endpoint.
+    if (isFeatureEnabled(process.env.ENABLE_METRICS, infraDefault)) {
+      const { metricsHandler } = await import('./monitoring/metricsServer.js');
+      // Access control for /metrics (finding 1.40 → 2.40): metrics must not be
+      // scrapeable by anonymous public clients. When METRICS_TOKEN is configured,
+      // require a matching bearer token; otherwise restrict scraping to loopback
+      // addresses (the common sidecar/host-scrape topology) so the endpoint is
+      // never exposed unauthenticated on a public interface.
+      const metricsToken = process.env.METRICS_TOKEN;
+      app.get(
+        '/metrics',
+        (req, res, next) => {
+          if (metricsToken) {
+            if (req.headers['authorization'] === `Bearer ${metricsToken}`) {
+              return next();
+            }
+            return res.status(401).json({ error: 'Unauthorized' });
+          }
+          const ip = req.ip || req.socket.remoteAddress || '';
+          if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') {
+            return next();
+          }
+          return res.status(403).json({ error: 'Forbidden' });
+        },
+        metricsHandler
+      );
+    }
+
     return new Promise<void>((resolve, reject) => {
       // Handle port-in-use and other listen errors
       const onError = (err: NodeJS.ErrnoException) => {
@@ -296,6 +426,17 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
     const SHUTDOWN_TIMEOUT_MS = 10_000;
 
     return new Promise<void>((resolve) => {
+      // Stop the WebSocket heartbeat timer and remove the upgrade listener so it
+      // does not outlive the server (no-op if WebSocket was never wired).
+      if (wsCleanup) {
+        try {
+          wsCleanup();
+        } catch {
+          // Best-effort cleanup; ignore errors during shutdown.
+        }
+        wsCleanup = null;
+      }
+
       // Stop accepting new connections
       server.close(() => {
         // All connections drained gracefully

@@ -11,10 +11,51 @@ const commentSchema = z.object({
   content: z.string().min(1).max(5000),
 });
 
-export const createCommentRoutes = (db: any, authenticate: any, logError: any) => {
+/**
+ * Maps a comment's `related_type` to the permission module that governs the
+ * parent entity. Reading the comments on an entity is allowed only when the
+ * user may view that entity, so object-level authorization is derived from the
+ * parent resource rather than granted to any authenticated user.
+ */
+const RELATED_TYPE_MODULES: Record<string, string> = {
+  audit_plans: 'AuditPlans',
+  audit_tasks: 'AuditTasks',
+  audit_findings: 'AuditFindings',
+  audit_evidence: 'AuditEvidence',
+  recommendations: 'Recommendations',
+  risk_register: 'RiskRegister',
+  compliance_items: 'ComplianceMatrix',
+  conflict_of_interest: 'IntegrityManagement',
+  correspondence: 'Correspondence',
+  incoming_correspondence: 'Correspondence',
+  outgoing_letters: 'Correspondence',
+  audit_reports: 'Reports',
+};
+
+export const createCommentRoutes = (db: any, authenticate: any, checkPermission: any, logError: any) => {
   const router = express.Router();
 
-  router.get("/:type/:id", authenticate, asyncHandler(async (req, res) => {
+  /**
+   * Object-level authorization (IDOR fix, finding 1.7 → 2.7).
+   *
+   * Resolves the permission module from the requested `related_type` and
+   * delegates to `checkPermission(module, 'View')`, so a user only receives the
+   * comments on entities they are entitled to view. Unknown/unmapped types are
+   * denied rather than defaulting to open access.
+   */
+  const authorizeCommentView = (req: any, res: any, next: any) => {
+    const type = req.params.type as string;
+    const moduleName = RELATED_TYPE_MODULES[type];
+    if (!moduleName) {
+      return res.status(403).json({
+        error: `Forbidden: comments on resource type '${type}' are not viewable`,
+        code: 'PERMISSION_DENIED',
+      });
+    }
+    return checkPermission(moduleName, 'View')(req, res, next);
+  };
+
+  router.get("/:type/:id", authenticate, authorizeCommentView, asyncHandler(async (req, res) => {
     const comments = await CommentService.getComments(req.params.type as string, req.params.id as string);
     res.json(comments);
   }));

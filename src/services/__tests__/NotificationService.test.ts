@@ -10,6 +10,9 @@ const { mockPrepare } = vi.hoisted(() => ({
 vi.mock('../../db/index', () => ({
   db: {
     prepare: mockPrepare,
+    // Pass-through transaction: invoke the callback inline so the per-recipient
+    // write fan-out runs against the mocked prepare (finding 1.13 → 2.13).
+    transaction: vi.fn((fn: Function) => fn()),
   },
 }));
 
@@ -366,12 +369,16 @@ describe('NotificationService', () => {
       const result = await NotificationService.getAdminIds();
 
       expect(result).toEqual(['admin-1', 'admin-2']);
+      // Role constant is now parameterized (finding 1.36 → 2.36): the query uses
+      // `role = ?` with UserRole.ADMIN bound as a parameter rather than being
+      // interpolated into the SQL string.
       expect(mockPrepare).toHaveBeenCalledWith(
-        expect.stringContaining("role = 'Admin'")
+        expect.stringContaining('role = ?')
       );
       expect(mockPrepare).toHaveBeenCalledWith(
         expect.stringContaining("status = 'Active'")
       );
+      expect(mockAll).toHaveBeenCalledWith('Admin');
     });
   });
 

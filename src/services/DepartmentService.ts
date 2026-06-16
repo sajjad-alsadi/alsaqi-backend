@@ -2,6 +2,7 @@
 import { db } from '../db/index';
 import { NotFoundError, ValidationError } from '../utils/errors';
 import * as crypto from 'crypto';
+import { AuditChainService } from './AuditChainService';
 
 /**
  * DepartmentService — thin alias over org_entities.
@@ -14,6 +15,10 @@ export class DepartmentService {
   /** Returns org_entities in a shape that satisfies all existing dropdowns */
   static async getAll() {
     try {
+      // Bounded to prevent an unbounded read (finding 1.33 → 2.33). org_entities
+      // has no soft-delete column; archived rows are already excluded via
+      // status != 'Archived'. The high LIMIT comfortably covers realistic org
+      // structures while capping worst-case result size.
       return await db.prepare(`
         SELECT
           id,
@@ -31,6 +36,7 @@ export class DepartmentService {
         FROM org_entities
         WHERE status != 'Archived'
         ORDER BY level, display_order, name_ar
+        LIMIT 2000
       `).all();
     } catch (error) {
       console.error("Error in DepartmentService.getAll:", error);
@@ -86,11 +92,12 @@ export class DepartmentService {
       data.cost_center_code ?? null
     );
 
-    await db.prepare(
-      `INSERT INTO audit_trail ("user", action, module, details)
-       VALUES (?, ?, ?, ?)`
-    ).run(createdBy, 'Created Org Entity', 'OrgStructure',
-      `Created: ${data.name_ar} (${data.entity_code})`);
+    await AuditChainService.append({
+      user: createdBy,
+      action: 'Created Org Entity',
+      module: 'OrgStructure',
+      details: `Created: ${data.name_ar} (${data.entity_code})`,
+    });
 
     return { id, name: data.name_ar };
   }
@@ -107,7 +114,9 @@ export class DepartmentService {
     if (!existing) throw new NotFoundError('Org entity not found');
 
     const entries = Object.entries(data).filter(([, v]) => v !== undefined);
-    const sets = entries.map(([k]) => `${k} = ?`).join(', ');
+    // Validate every column identifier before interpolating it into the dynamic
+    // SET clause, matching every other dynamic-SET path (finding 1.12 → 2.12).
+    const sets = entries.map(([k]) => `${db.validateIdentifier(k)} = ?`).join(', ');
     const vals = entries.map(([, v]) => v);
 
     if (sets) {
@@ -116,10 +125,12 @@ export class DepartmentService {
       ).run(...vals, id);
     }
 
-    await db.prepare(
-      `INSERT INTO audit_trail ("user", action, module, details)
-       VALUES (?, ?, ?, ?)`
-    ).run(updatedBy, 'Updated Org Entity', 'OrgStructure', `Updated entity ID: ${id}`);
+    await AuditChainService.append({
+      user: updatedBy,
+      action: 'Updated Org Entity',
+      module: 'OrgStructure',
+      details: `Updated entity ID: ${id}`,
+    });
 
     return { id };
   }
@@ -139,9 +150,11 @@ export class DepartmentService {
       `UPDATE org_entities SET status = 'Archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
     ).run(id);
 
-    await db.prepare(
-      `INSERT INTO audit_trail ("user", action, module, details)
-       VALUES (?, ?, ?, ?)`
-    ).run(deletedBy, 'Archived Org Entity', 'OrgStructure', `Archived entity ID: ${id}`);
+    await AuditChainService.append({
+      user: deletedBy,
+      action: 'Archived Org Entity',
+      module: 'OrgStructure',
+      details: `Archived entity ID: ${id}`,
+    });
   }
 }

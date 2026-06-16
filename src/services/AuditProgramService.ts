@@ -2,8 +2,8 @@ import { db } from '../db/index';
 import { NotFoundError, ForbiddenError, ValidationError } from '../utils/errors';
 import { UserRole } from '@alsaqi/shared';
 import { NotificationService } from './NotificationService';
-import { DEFAULT_PERMISSIONS, MODULES, PERMISSIONS } from '../permissions.js';
-import type { Role } from '../permissions.js';
+import { MODULES, PERMISSIONS } from '../permissions.js';
+import { PermissionService } from './PermissionService';
 
 export interface CreateProgramInput {
   program_code: string;
@@ -237,10 +237,14 @@ export class AuditProgramService {
     userId: string,
     userRole: string
   ): Promise<void> {
-    // 1. Validate user has APPROVE permission on AUDIT_PROGRAM_LIBRARY
-    const rolePermissions = DEFAULT_PERMISSIONS[userRole as Role];
-    const modulePermissions = rolePermissions?.[MODULES.AUDIT_PROGRAM_LIBRARY] || [];
-    
+    // 1. Validate user has APPROVE permission on AUDIT_PROGRAM_LIBRARY.
+    // Authorize against the user's EFFECTIVE DB permissions (role grants + user
+    // overrides, with explicit denies subtracted) via PermissionService rather than the
+    // static DEFAULT_PERMISSIONS map, so runtime permission changes and per-user
+    // overrides are honored (finding 1.40 authz).
+    const effective = await PermissionService.getUserPermissions(userId);
+    const modulePermissions = effective.permissions[MODULES.AUDIT_PROGRAM_LIBRARY] || [];
+
     if (!modulePermissions.includes(PERMISSIONS.APPROVE)) {
       throw new ForbiddenError('ليس لديك صلاحية اعتماد برامج التدقيق');
     }

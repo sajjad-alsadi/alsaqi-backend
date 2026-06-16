@@ -156,8 +156,9 @@ export const createAuditFindingRoutes = (
       `SELECT id, audit_id, finding_id, evidence_number, type, description,
               uploaded_by, upload_date, file_name, file_path
        FROM audit_evidence
-       WHERE finding_id = ?
-       ORDER BY upload_date ASC`
+       WHERE finding_id = ? AND deleted_at IS NULL
+       ORDER BY upload_date ASC
+       LIMIT 500`
     ).all(findingId);
 
     res.json({

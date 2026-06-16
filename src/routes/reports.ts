@@ -74,6 +74,7 @@ export const createReportsRoutes = (
   router.post(
     '/generate',
     authenticate,
+    checkPermission('Reports', 'Create'),
     asyncHandler(async (req: any, res: any) => {
       const validation = generateReportSchema.safeParse(req.body);
       if (!validation.success) {
@@ -131,6 +132,7 @@ export const createReportsRoutes = (
   router.get(
     '/:reportId/status',
     authenticate,
+    checkPermission('Reports', 'View'),
     asyncHandler(async (req: any, res: any) => {
       const { reportId } = req.params;
 

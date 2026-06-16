@@ -79,10 +79,21 @@ export const createCrudRoutes = (
     router.get(`/${routeName}`, authenticate, checkPermission(moduleName, 'View'), asyncHandler(async (req, res) => {
       const { page, pageSize } = parsePaginationParams(req.query as Record<string, any>);
 
-      // Extract all query params except page and pageSize as filters
-      const { page: _, pageSize: __, ...filters } = req.query;
-      
+      // Extract all query params except page and pageSize as candidate filters
+      const { page: _, pageSize: __, ...rawFilters } = req.query;
+
       const allowedFields = TABLE_ALLOWED_FIELDS[tableName] || [];
+
+      // Only accept whitelisted filter keys (mass-filter / column-injection
+      // prevention). Arbitrary req.query keys are no longer passed through as
+      // `where` filters (finding 1.15 → 2.15).
+      const filters: Record<string, any> = {};
+      for (const key of Object.keys(rawFilters)) {
+        if (allowedFields.includes(key)) {
+          filters[key] = (rawFilters as Record<string, any>)[key];
+        }
+      }
+
       const excludeFromSelect = ['file_data', 'content', 'attachment_file', 'attachment', 'file_url'];
       const selectFields = ['id', 'created_at', 'updated_at', ...allowedFields.filter(f => !excludeFromSelect.includes(f))];
 
