@@ -68,6 +68,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json ./packages/shared/
 
+# Skip Puppeteer's bundled Chromium download — we use the system Chromium
+# installed above (see PUPPETEER_EXECUTABLE_PATH below).
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
 RUN npm ci --include-workspace-root --omit=dev
 
 # Copy the bundled output from the build stage
@@ -91,7 +95,6 @@ ENV UPLOAD_DIR=/app/uploads
 # build. PUPPETEER_SKIP_DOWNLOAD avoids fetching a browser at install time, and
 # PUPPETEER_EXECUTABLE_PATH points Puppeteer at the reachable binary so in-container
 # PDF generation works under the non-root runtime user (Finding 1.23 → 2.23).
-ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expose the API port
