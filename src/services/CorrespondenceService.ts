@@ -237,12 +237,25 @@ export class CorrespondenceService {
   }
 
   static async getStats() {
+    const [incomingStats, outgoingCount] = await Promise.all([
+      this.db.prepare(`
+        SELECT
+          COUNT(*) FILTER (WHERE NOT is_archived) as total_incoming,
+          COUNT(*) FILTER (WHERE response_required = true AND status != 'Closed' AND NOT is_archived) as pending_response,
+          COUNT(*) FILTER (WHERE follow_up_required = true AND NOT is_archived) as follow_up,
+          COUNT(*) FILTER (WHERE is_archived) as archived
+        FROM incoming_correspondence
+        WHERE deleted_at IS NULL
+      `).get() as Promise<any>,
+      this.db.prepare("SELECT COUNT(*) as count FROM outgoing_letters WHERE deleted_at IS NULL").get() as Promise<any>,
+    ]);
+
     return {
-      total_incoming: (await this.db.prepare("SELECT COUNT(*) as count FROM incoming_correspondence WHERE is_archived = 0").get() as any).count,
-      total_outgoing: (await this.db.prepare("SELECT COUNT(*) as count FROM outgoing_letters").get() as any).count,
-      pending_response: (await this.db.prepare("SELECT COUNT(*) as count FROM incoming_correspondence WHERE response_required = 1 AND status != 'Closed' AND is_archived = 0").get() as any).count,
-      follow_up: (await this.db.prepare("SELECT COUNT(*) as count FROM incoming_correspondence WHERE follow_up_required = 1 AND is_archived = 0").get() as any).count,
-      archived: (await this.db.prepare("SELECT COUNT(*) as count FROM incoming_correspondence WHERE is_archived = 1").get() as any).count
+      total_incoming: Number(incomingStats?.total_incoming || 0),
+      total_outgoing: Number(outgoingCount?.count || 0),
+      pending_response: Number(incomingStats?.pending_response || 0),
+      follow_up: Number(incomingStats?.follow_up || 0),
+      archived: Number(incomingStats?.archived || 0),
     };
   }
 
@@ -270,23 +283,23 @@ export class CorrespondenceService {
 
     if (!record) throw new NotFoundError("Record not found");
 
-    const attachments = await this.db.prepare("SELECT id, file_name, file_type, uploaded_at, description FROM correspondence_attachments WHERE correspondence_type = ? AND correspondence_id = ?").all(type, id);
-    const history = await this.db.prepare("SELECT h.*, u.name as user_name FROM correspondence_status_history h LEFT JOIN users u ON h.changed_by = u.id WHERE correspondence_type = ? AND correspondence_id = ? ORDER BY h.change_date DESC").all(type, id);
-    
-    const links: Record<string, unknown>[] = [];
-    let referrals: Record<string, unknown>[] = [];
+    const [attachments, history, referrals] = await Promise.all([
+      this.db.prepare("SELECT id, file_name, file_type, uploaded_at, description FROM correspondence_attachments WHERE correspondence_type = ? AND correspondence_id = ?").all(type, id),
+      this.db.prepare("SELECT h.*, u.name as user_name FROM correspondence_status_history h LEFT JOIN users u ON h.changed_by = u.id WHERE correspondence_type = ? AND correspondence_id = ? ORDER BY h.change_date DESC").all(type, id),
+      type !== 'outgoing'
+        ? this.db.prepare(`
+            SELECT r.*, u1.name as from_user, u2.name as to_user, d.name_ar as to_dept
+            FROM correspondence_referrals r
+            LEFT JOIN users u1 ON r.from_user_id = u1.id
+            LEFT JOIN users u2 ON r.to_user_id = u2.id
+            LEFT JOIN org_entities d ON r.to_dept_id = d.id
+            WHERE r.incoming_id = ?
+            ORDER BY r.referral_date DESC
+          `).all(id)
+        : Promise.resolve([]),
+    ]);
 
-    if (type !== 'outgoing') {
-      referrals = await this.db.prepare(`
-        SELECT r.*, u1.name as from_user, u2.name as to_user, d.name_ar as to_dept
-        FROM correspondence_referrals r
-        LEFT JOIN users u1 ON r.from_user_id = u1.id
-        LEFT JOIN users u2 ON r.to_user_id = u2.id
-        LEFT JOIN org_entities d ON r.to_dept_id = d.id
-        WHERE r.incoming_id = ?
-        ORDER BY r.referral_date DESC
-      `).all(id);
-    }
+    const links: Record<string, unknown>[] = [];
 
     return { main: record, attachments, history, links, referrals };
   }

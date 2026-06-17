@@ -235,17 +235,16 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   app.use('/api', versionFallbackRewrite);
 
   // ─── Health Check ───────────────────────────────────────────────────────────
-  app.get('/api/health', (_req, res) => {
+  const healthHandler: import('express').RequestHandler = (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
+  };
 
-  app.get('/api/v1/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
+  app.get('/api/health', healthHandler);
+  app.get('/api/v1/health', healthHandler);
 
   // ─── Readiness Probe ──────────────────────────────────────────────────────────
   // Verifies actual DB and Redis connectivity (for load balancer routing decisions)
-  app.get('/api/health/ready', async (_req, res) => {
+  const readinessHandler: import('express').RequestHandler = async (_req, res) => {
     const checks: Record<string, string> = {};
     let healthy = true;
 
@@ -274,35 +273,10 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
 
     const status = healthy ? 200 : 503;
     res.status(status).json({ status: healthy ? 'ready' : 'degraded', checks, timestamp: new Date().toISOString() });
-  });
+  };
 
-  app.get('/api/v1/health/ready', async (_req, res) => {
-    const checks: Record<string, string> = {};
-    let healthy = true;
-
-    try {
-      const { db: database } = await import('./db/index.js');
-      await database.prepare('SELECT 1').get();
-      checks.database = 'ok';
-    } catch (e) {
-      checks.database = 'failed';
-      healthy = false;
-    }
-
-    try {
-      const { redisManager } = await import('./cache/redisManager.js');
-      if (redisManager.status === 'connected') {
-        checks.redis = 'ok';
-      } else {
-        checks.redis = 'not_connected';
-      }
-    } catch (e) {
-      checks.redis = 'unavailable';
-    }
-
-    const status = healthy ? 200 : 503;
-    res.status(status).json({ status: healthy ? 'ready' : 'degraded', checks, timestamp: new Date().toISOString() });
-  });
+  app.get('/api/health/ready', readinessHandler);
+  app.get('/api/v1/health/ready', readinessHandler);
 
   // ─── Versioned Routes (v1) ──────────────────────────────────────────────────
   // Route registration is deferred to start() where DB and middleware are initialized.

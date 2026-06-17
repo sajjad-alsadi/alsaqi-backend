@@ -8,7 +8,7 @@ import { validateSchema, validateIdParam } from '../middleware/validate';
 import { invalidateUserCache } from '../middleware/auth';
 import { UserRole, AccessScope } from '@alsaqi/shared';
 import { DEFAULT_PASSWORD_MIN_LENGTH } from '../services/passwordPolicy';
-import { createSuccessResponse, createErrorResponse, computePagination } from '../utils/responseEnvelope.js';
+import { createSuccessResponse, computePagination } from '../utils/responseEnvelope.js';
 import { lastAdminGuard } from '../middleware/lastAdminGuard.js';
 
 const userSchema = z.object({
@@ -82,7 +82,7 @@ export const createUserRoutes = (
     
     await AuthService.logAudit((req as any).user.username, "Created User", "User Management", `Created user ${user.username} with role ${user.role}`);
       
-    res.json(createSuccessResponse({ data: user }));
+    res.status(201).json(createSuccessResponse({ data: user }));
   }));
 
   router.put(`/:id`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), validateSchema(userSchema), asyncHandler(async (req, res) => {
@@ -178,13 +178,9 @@ export const createUserRoutes = (
     newPassword: z.string().min(DEFAULT_PASSWORD_MIN_LENGTH).max(100)
   });
 
-  router.post(`/:id/reset-password`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), asyncHandler(async (req, res) => {
+  router.post(`/:id/reset-password`, authenticate, checkPermission('UserManagement', 'Edit'), validateIdParam(), validateSchema(resetPasswordSchema), asyncHandler(async (req, res) => {
     const id = req.params.id as string;
-    const validation = resetPasswordSchema.safeParse(req.body);
-    if (!validation.success) {
-      throw new ValidationError("Invalid password data", validation.error.format());
-    }
-    const { newPassword } = validation.data;
+    const { newPassword } = req.body;
     const username = await UserService.resetPassword(id, newPassword);
 
     await invalidateUserCache(id);

@@ -92,7 +92,7 @@ export class DashboardService {
         (SELECT COUNT(*) ${complianceQb.buildCountQuery()}) as compliance_count,
 
         (SELECT json_agg(t) FROM (
-          SELECT id, "user", action, module, timestamp, details FROM audit_trail ORDER BY timestamp DESC LIMIT 10
+          SELECT id, "user", action, module, timestamp, details FROM audit_trail WHERE timestamp > CURRENT_TIMESTAMP - INTERVAL '7 days' ORDER BY timestamp DESC LIMIT 10
         ) t) as recent_activity,
 
         (SELECT json_agg(t) FROM (

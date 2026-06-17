@@ -1674,6 +1674,10 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO system_policies (policy_key, content) VALUES
     ('fraud_policy', '<h3>سياسة مكافحة الاحتيال والفساد</h3><p>تلتزم المؤسسة بأعلى معايير النزاهة والشفافية.</p>')
 ON CONFLICT (policy_key) DO NOTHING;
+-- ─── Performance: Additional indexes for common query patterns ─────────────
+CREATE INDEX IF NOT EXISTS idx_incoming_corr_is_archived ON incoming_correspondence(is_archived) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_notifications_date_desc ON notifications(user_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_outgoing_corr_created_by ON outgoing_correspondence(created_by) WHERE deleted_at IS NULL;
 
 -- ============================================================================
 -- نهاية المخطط
