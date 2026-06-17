@@ -106,11 +106,11 @@ export class LogService {
       conditions.push("severity = ?");
       params.push(severity);
     }
-    if (start_date) {
+    if (start_date && new Date(start_date).toString() !== 'Invalid Date') {
       conditions.push("timestamp >= ?");
       params.push(start_date);
     }
-    if (end_date) {
+    if (end_date && new Date(end_date).toString() !== 'Invalid Date') {
       conditions.push("timestamp <= ?");
       params.push(end_date);
     }
@@ -124,7 +124,7 @@ export class LogService {
     const countRes = await db.prepare(`SELECT COUNT(*) as total FROM system_error_log${whereClause}`).get(...params) as any;
     const total = countRes?.total || 0;
 
-    const logs = await db.prepare(`SELECT id, message, module, user_id, severity, url, timestamp FROM system_error_log${whereClause} ORDER BY timestamp DESC LIMIT ? OFFSET ?`)
+    const logs = await db.prepare(`SELECT id, message, module, user_id, severity, url, request_data, timestamp FROM system_error_log${whereClause} ORDER BY timestamp DESC LIMIT ? OFFSET ?`)
       .all(...params, pageSize, offset) as any[];
     
     return {

@@ -1,13 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import cron, { ScheduledTask } from 'node-cron';
 import { db } from '../db/index';
 import logger from './logger';
-
-const execAsync = promisify(exec);
 
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(process.cwd(), 'backups');
 const MAX_BACKUPS = parseInt(process.env.MAX_BACKUPS || '7', 10);
@@ -187,9 +184,46 @@ export class BackupScheduler {
           throw new Error('DATABASE_URL is not set for external PostgreSQL backup');
         }
 
-        await execAsync(
-          `pg_dump "${databaseUrl}" | gzip > "${filePath}"`
-        );
+        await new Promise<void>((resolve, reject) => {
+          const pgDump = spawn('pg_dump', [databaseUrl], { stdio: ['ignore', 'pipe', 'pipe'] });
+          const gzip = spawn('gzip', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+          const output = fs.createWriteStream(filePath);
+
+          pgDump.stdout.pipe(gzip.stdin);
+          gzip.stdout.pipe(output);
+
+          let pgDumpStderr = '';
+          let gzipStderr = '';
+          pgDump.stderr.on('data', (data) => { pgDumpStderr += data.toString(); });
+          gzip.stderr.on('data', (data) => { gzipStderr += data.toString(); });
+
+          let exitCount = 0;
+          const checkDone = () => {
+            exitCount++;
+            if (exitCount === 2) {
+              output.end(() => resolve());
+            }
+          };
+
+          pgDump.on('error', (err) => reject(new Error(`pg_dump spawn failed: ${err.message}`)));
+          gzip.on('error', (err) => reject(new Error(`gzip spawn failed: ${err.message}`)));
+
+          pgDump.on('close', (code) => {
+            if (code !== 0) {
+              gzip.kill();
+              reject(new Error(`pg_dump exited with code ${code}: ${pgDumpStderr.trim()}`));
+              return;
+            }
+            checkDone();
+          });
+          gzip.on('close', (code) => {
+            if (code !== 0) {
+              reject(new Error(`gzip exited with code ${code}: ${gzipStderr.trim()}`));
+              return;
+            }
+            checkDone();
+          });
+        });
 
         const stat = fs.statSync(filePath);
         sizeBytes = stat.size;
@@ -367,8 +401,8 @@ export class BackupScheduler {
       const { UserRole } = await import('@alsaqi/shared');
 
       const admins = await db.prepare(
-        `SELECT id FROM users WHERE role = '${UserRole.ADMIN}'`
-      ).all() as Array<{ id: string }>;
+        `SELECT id FROM users WHERE role = ?`
+      ).all(UserRole.ADMIN) as Array<{ id: string }>;
 
       const adminIds = admins.map(a => a.id);
       if (adminIds.length === 0) return;

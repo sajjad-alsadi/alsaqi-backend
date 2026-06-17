@@ -1,7 +1,9 @@
 import express from 'express';
 import { LogService } from '../services/LogService';
+import { AuthService } from '../services/AuthService';
 import { asyncHandler } from '../utils/asyncHandler';
 import { createRateLimiter } from '../middleware/rateLimiter';
+import logger from '../utils/logger';
 
 export const createLogRoutes = (
   db: any,
@@ -97,6 +99,15 @@ export const createLogRoutes = (
 
   router.delete("/system-errors", authenticate, checkPermission('SystemLogs', 'Delete'), asyncHandler(async (req, res) => {
     await LogService.clearSystemErrors();
+
+    // Audit the administrative action – wiping forensic data must be traceable.
+    const username = (req as any).user?.username || 'unknown';
+    try {
+      await AuthService.logAudit(username, "Cleared System Errors", "SystemLogs", "All system error logs were deleted");
+    } catch (auditErr) {
+      logger.error("Failed to write audit trail for clearSystemErrors", { error: auditErr, username });
+    }
+
     res.json({ success: true });
   }));
 
@@ -147,6 +158,11 @@ export const createLogRoutes = (
 
   router.post("/log-error", authenticate, errorReportLimiter, asyncHandler(async (req, res) => {
     const { message, stack, module } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: "Missing required fields" } });
+    }
+
     const userId = (req as any).user?.id;
     await LogService.logSystemError({
       message: sanitizeContent(message),

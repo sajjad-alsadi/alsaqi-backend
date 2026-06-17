@@ -246,7 +246,7 @@ export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PU
       return passwordChangeGate(req as AuthenticatedRequest, res, next);
     } catch (err) {
       if (!(err instanceof jwt.TokenExpiredError) && !(err instanceof jwt.JsonWebTokenError)) {
-        console.error("Auth error:", err);
+        logger.error("Auth middleware unexpected error:", err);
       }
       res.status(401).json({ error: "Invalid token" });
     }
@@ -280,7 +280,7 @@ export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PU
       }
       // In production, return a middleware that always responds with 500
       return (req: AuthenticatedRequest, res: Response, _next: NextFunction) => {
-        console.error(`checkPermission: Unregistered module '${module}' used in route middleware.`);
+        logger.error(`checkPermission: Unregistered module '${module}' used in route middleware.`);
         return res.status(500).json({
           error: 'Internal authorization configuration error',
         });
@@ -319,7 +319,7 @@ export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PU
         });
       } catch (err) {
         // Req 3.7: Handle PermissionService errors - return 500 without exposing internals
-        console.error(`checkPermission error for user ${user.id}, module ${module}, action ${action}:`, err);
+        logger.error(`checkPermission error for user ${user.id}, module ${module}, action ${action}:`, err);
         return res.status(500).json({
           error: 'Internal authorization error. Please try again later.',
         });

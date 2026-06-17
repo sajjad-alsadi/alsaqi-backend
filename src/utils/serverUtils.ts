@@ -5,6 +5,7 @@ import fs from "fs";
 import logger from "./logger";
 import { ValidationError } from "./errors";
 import { FileEncryptionService, EncryptFileInput } from "../services/FileEncryptionService";
+import { LogService } from "../services/LogService";
 
 // Try to load magika dynamically to avoid breaking if not installed properly
 let magikaInstance: any = null;
@@ -125,10 +126,12 @@ export const createLogError = (db: any) => async (err: any, module = "Backend") 
   logger.error(`[${module}] ${errorMessage}`, { stack: errorStack, module });
   
   try {
-    // Ensure we don't crash if DB is in a bad state or stack is too large for database
-    const stmt = await db.prepare("INSERT INTO system_error_log (message, stack, module) VALUES (?::text, ?::text, ?::text)");
-    const truncatedStack = errorStack ? errorStack.substring(0, 2000) : null;
-    await stmt.run(errorMessage, truncatedStack, module);
+    await LogService.logSystemError({
+      message: errorMessage,
+      stack: errorStack,
+      module,
+      severity: 'error',
+    });
   } catch (e) {
     logger.error("CRITICAL: Failed to log error to DB.", { error: e });
   }

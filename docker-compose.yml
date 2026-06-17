@@ -52,12 +52,16 @@ services:
   redis:
     image: redis:7-alpine
     container_name: alsaqi-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required} --appendonly yes --appendfsync everysec
+    environment:
+      - REDISCLI_AUTH=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redis_data:/data
     networks:
       - alsaqi-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}", "ping"]
+      test: ["CMD", "redis-cli", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -70,3 +74,5 @@ networks:
 volumes:
   postgres_data:
     name: alsaqi_postgres_data
+  redis_data:
+    name: alsaqi_redis_data

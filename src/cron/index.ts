@@ -325,7 +325,7 @@ const runDailyAutomations = async () => {
 
       // Notify department heads or compliance officers
       // For now, notify all admins
-      const admins = await db.prepare(`SELECT id FROM users WHERE role IN ('${UserRole.ADMIN}')`).all();
+      const admins = await db.prepare(`SELECT id FROM users WHERE role = ?`).all(UserRole.ADMIN);
       for (const admin of admins) {
         await NotificationService.create(
           admin.id,
@@ -362,7 +362,7 @@ const runDailyAutomations = async () => {
       `);
       await updateStmt.run(lastYearStr);
 
-      const admins = await db.prepare(`SELECT id FROM users WHERE role IN ('${UserRole.ADMIN}')`).all();
+      const admins = await db.prepare(`SELECT id FROM users WHERE role = ?`).all(UserRole.ADMIN);
       for (const admin of admins) {
         await NotificationService.create(
           admin.id,
@@ -424,8 +424,8 @@ let lastDeadlineCheckDate: string | null = null;
  */
 export async function getManagerAdminIds(): Promise<string[]> {
   const users = await db.prepare(
-    `SELECT id FROM users WHERE role IN ('${UserRole.ADMIN}', '${UserRole.MANAGER}') AND status = 'Active'`
-  ).all() as any[];
+    `SELECT id FROM users WHERE role IN (?, ?) AND status = 'Active'`
+  ).all(UserRole.ADMIN, UserRole.MANAGER) as any[];
   return users.map((u: any) => u.id);
 }
 

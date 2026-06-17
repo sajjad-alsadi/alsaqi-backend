@@ -8,6 +8,7 @@
  *   subprotocol on upgrade (a dedicated ws token is required)
  * - Server-initiated ping every 30 seconds with 10-second pong timeout
  * - Real-time notification delivery within 2 seconds of triggering event
+ * - Per-user connection limit (max 5) and global maximum (10,000)
  *
  * Requirements: 9.1, 6.5
  */
@@ -23,6 +24,12 @@ import type { AuthenticatedWs, WsNotificationPayload } from './notifications.js'
 export type { AuthenticatedWs, WsNotificationPayload } from './notifications.js';
 export type { WsAuthPayload } from './auth.js';
 export { broadcastToUsers, broadcastToAll, getConnectedClientCount } from './notifications.js';
+
+// ─── Connection Limits ──────────────────────────────────────────────────────
+/** Maximum WebSocket connections per authenticated user. */
+const MAX_CONNECTIONS_PER_USER = 5;
+/** Maximum total WebSocket connections across all users. */
+const MAX_TOTAL_CONNECTIONS = 10_000;
 
 export interface WsSetupOptions {
   /** The HTTP server to handle upgrade events on */
@@ -61,6 +68,14 @@ export function setupWebSocket(options: WsSetupOptions): () => void {
     socket: import('stream').Duplex,
     head: Buffer
   ) => {
+    // Global connection limit: reject if at capacity
+    if (wss.clients.size >= MAX_TOTAL_CONNECTIONS) {
+      logger.warn(`WebSocket global limit reached (${MAX_TOTAL_CONNECTIONS}). Rejecting connection.`);
+      socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
     // Authentication re-checks the authoritative user record, so it is async.
     // Any failure (invalid/expired/non-ws token, revoked session, blocked
     // account, or store error) is treated as unauthorized.
@@ -68,6 +83,21 @@ export function setupWebSocket(options: WsSetupOptions): () => void {
       .then((authPayload) => {
         if (!authPayload) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
+        // Per-user connection limit: count existing connections for this user
+        let userConnectionCount = 0;
+        for (const client of wss.clients) {
+          const authedClient = client as unknown as AuthenticatedWs;
+          if (authedClient.userId === authPayload.id) {
+            userConnectionCount++;
+          }
+        }
+        if (userConnectionCount >= MAX_CONNECTIONS_PER_USER) {
+          logger.warn(`WebSocket per-user limit reached for user ${authPayload.id} (${MAX_CONNECTIONS_PER_USER}). Rejecting.`);
+          socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
           socket.destroy();
           return;
         }
