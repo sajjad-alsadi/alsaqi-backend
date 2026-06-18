@@ -312,20 +312,20 @@ describe('Correspondence Integration Tests', () => {
   describe('PUT /api/correspondence/status/:type/:id', () => {
     it('should return 200 on valid status update', async () => {
       const res = await request(app)
-        .put('/api/correspondence/status/incoming/inc-1')
+        .put('/api/correspondence/status/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token')
-        .send({ new_status: 'In Progress' });
+        .send({ new_status: 'Under Review' });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(mockCorrespondenceService.updateStatus).toHaveBeenCalledWith(
-        'incoming', 'inc-1', 'In Progress', '', 'test-user-id'
+        'incoming', '550e8400-e29b-41d4-a716-446655440000', 'Under Review', '', 'test-user-id'
       );
     });
 
     it('should reject when new_status is missing', async () => {
       const res = await request(app)
-        .put('/api/correspondence/status/incoming/inc-1')
+        .put('/api/correspondence/status/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token')
         .send({});
 
@@ -334,7 +334,7 @@ describe('Correspondence Integration Tests', () => {
 
     it('should reject when new_status is empty string', async () => {
       const res = await request(app)
-        .put('/api/correspondence/status/incoming/inc-1')
+        .put('/api/correspondence/status/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token')
         .send({ new_status: '' });
 
@@ -343,13 +343,13 @@ describe('Correspondence Integration Tests', () => {
 
     it('should accept optional notes field', async () => {
       const res = await request(app)
-        .put('/api/correspondence/status/outgoing/out-1')
+        .put('/api/correspondence/status/outgoing/660e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token')
         .send({ new_status: 'Sent', notes: 'Sent via official mail' });
 
       expect(res.status).toBe(200);
       expect(mockCorrespondenceService.updateStatus).toHaveBeenCalledWith(
-        'outgoing', 'out-1', 'Sent', 'Sent via official mail', 'test-user-id'
+        'outgoing', '660e8400-e29b-41d4-a716-446655440000', 'Sent', 'Sent via official mail', 'test-user-id'
       );
     });
   });
@@ -466,12 +466,12 @@ describe('Correspondence Integration Tests', () => {
   describe('PUT /api/correspondence/archive/:type/:id', () => {
     it('should return 200 on successful archive', async () => {
       const res = await request(app)
-        .put('/api/correspondence/archive/incoming/inc-1')
+        .put('/api/correspondence/archive/incoming/550e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token');
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockCorrespondenceService.archive).toHaveBeenCalledWith('incoming', 'inc-1');
+      expect(mockCorrespondenceService.archive).toHaveBeenCalledWith('incoming', '550e8400-e29b-41d4-a716-446655440000');
       expect(mockAuthService.logAudit).toHaveBeenCalledWith(
         'testuser', 'ARCHIVE', 'Correspondence', expect.stringContaining('incoming')
       );
@@ -479,11 +479,11 @@ describe('Correspondence Integration Tests', () => {
 
     it('should work for outgoing type', async () => {
       const res = await request(app)
-        .put('/api/correspondence/archive/outgoing/out-1')
+        .put('/api/correspondence/archive/outgoing/660e8400-e29b-41d4-a716-446655440000')
         .set('Authorization', 'Bearer valid-token');
 
       expect(res.status).toBe(200);
-      expect(mockCorrespondenceService.archive).toHaveBeenCalledWith('outgoing', 'out-1');
+      expect(mockCorrespondenceService.archive).toHaveBeenCalledWith('outgoing', '660e8400-e29b-41d4-a716-446655440000');
     });
   });
 

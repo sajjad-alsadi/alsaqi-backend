@@ -7,17 +7,32 @@ import { ValidationError } from '../utils/errors';
 import { parsePaginationParams } from '../utils/paginationService';
 import { validateBody, validateParams, validateQuery } from '../middleware/validate';
 import { correspondenceAttachmentSchema, idParamSchema, crudQuerySchema } from '../schemas';
+import { PRIORITIES, CLASSIFICATIONS, METHODS, ENTITY_TYPES, LINK_TYPES, INCOMING_STATUSES, OUTGOING_STATUSES } from '@alsaqi/shared';
+
+const typeParamSchema = z.object({
+  type: z.enum(['incoming', 'outgoing'], { message: 'type must be "incoming" or "outgoing"' }),
+});
+
+const typeIdParamSchema = z.object({
+  type: z.enum(['incoming', 'outgoing'], { message: 'type must be "incoming" or "outgoing"' }),
+  id: z.string().refine(
+    (val) =>
+      /^\d+$/.test(val) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val),
+    { message: 'id must be a valid integer or UUID' }
+  ),
+});
 
 const incomingSchema = z.object({
   letter_number: z.string().min(1).max(100),
   sender_entity: z.string().min(1).max(255),
-  sender_entity_type: z.string().optional(),
+  sender_entity_type: z.enum(ENTITY_TYPES).optional(),
   subject: z.string().min(1).max(500),
   letter_date: z.string().min(1),
   receipt_date: z.string().min(1),
-  classification: z.string().optional(),
-  priority: z.string().optional(),
-  method: z.string().optional(),
+  classification: z.enum(CLASSIFICATIONS).optional(),
+  priority: z.enum(PRIORITIES).optional(),
+  method: z.enum(METHODS).optional(),
   receiving_dept_id: z.string().uuid().optional().nullable(),
   assigned_dept_id: z.string().uuid().optional().nullable(),
   assigned_user_id: z.string().uuid().optional().nullable(),
@@ -32,8 +47,8 @@ const outgoingSchema = z.object({
   letter_date: z.string().min(1),
   recipient_entity: z.string().min(1).max(255),
   subject: z.string().min(1).max(500),
-  classification: z.string().optional(),
-  sending_method: z.string().optional(),
+  classification: z.enum(CLASSIFICATIONS).optional(),
+  sending_method: z.enum(METHODS).optional(),
   attachment_file: z.string().optional().nullable()
 });
 
@@ -47,12 +62,17 @@ const referSchema = z.object({
 const linkSchema = z.object({
   incoming_id: z.string().uuid(),
   outgoing_id: z.string().uuid(),
-  link_type: z.string().optional().default('Reply')
+  link_type: z.enum(LINK_TYPES).optional().default('Reply')
 });
 
-const statusUpdateSchema = z.object({
-  new_status: z.string().min(1),
-  notes: z.string().optional().nullable()
+const incomingStatusUpdateSchema = z.object({
+  new_status: z.enum(INCOMING_STATUSES),
+  notes: z.string().optional().nullable(),
+});
+
+const outgoingStatusUpdateSchema = z.object({
+  new_status: z.enum(OUTGOING_STATUSES),
+  notes: z.string().optional().nullable(),
 });
 
 export const createCorrespondenceRoutes = (
@@ -103,10 +123,11 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 2. Status History and Updates
-  router.put("/status/:type/:id", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
+  router.put("/status/:type/:id", authenticate, checkPermission('Correspondence', 'Edit'), validateParams(typeIdParamSchema), asyncHandler(async (req, res) => {
     const type = req.params.type as string;
     const id = req.params.id as string;
-    const validation = statusUpdateSchema.safeParse(req.body);
+    const schema = type === 'outgoing' ? outgoingStatusUpdateSchema : incomingStatusUpdateSchema;
+    const validation = schema.safeParse(req.body);
     if (!validation.success) {
       throw new ValidationError("Invalid status update data", validation.error.format());
     }
@@ -133,7 +154,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 5. Linking
-  router.post("/link", authenticate, asyncHandler(async (req, res) => {
+  router.post("/link", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
     const validation = linkSchema.safeParse(req.body);
     if (!validation.success) {
       throw new ValidationError("Invalid link data", validation.error.format());
@@ -146,7 +167,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 6. Archiving
-  router.put("/archive/:type/:id", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
+  router.put("/archive/:type/:id", authenticate, checkPermission('Correspondence', 'Edit'), validateParams(typeIdParamSchema), asyncHandler(async (req, res) => {
     const type = req.params.type as string;
     const id = req.params.id as string;
     await CorrespondenceService.archive(type, id);
@@ -162,7 +183,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 7. Attachments
-  router.get("/attachments/:type/:id", authenticate, asyncHandler(async (req, res) => {
+  router.get("/attachments/:type/:id", authenticate, validateParams(typeIdParamSchema), asyncHandler(async (req, res) => {
     const type = req.params.type as string;
     const id = req.params.id as string;
     const data = await CorrespondenceService.getAttachments(type, id);
@@ -184,7 +205,7 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 9. Details (Unified)
-  router.get("/details/:type/:id", authenticate, asyncHandler(async (req, res) => {
+  router.get("/details/:type/:id", authenticate, validateParams(typeIdParamSchema), asyncHandler(async (req, res) => {
     const type = req.params.type as string;
     const id = req.params.id as string;
     const details = await CorrespondenceService.getDetails(type, id);
@@ -219,12 +240,12 @@ export const createCorrespondenceRoutes = (
     
     const result = await CorrespondenceService.createOutgoing(validation.data, userId);
     
-    await AuthService.logAudit(username, "Create", "Outgoing Letters", `Created letter: ${result.sequence_number}`);
+    await AuthService.logAudit(username, "CREATE", "Correspondence", `Created outgoing letter: ${result.sequence_number}`);
         
     res.json(result);
   }));
 
-  router.put("/outgoing/:id", authenticate, checkPermission('Correspondence', 'Edit'), asyncHandler(async (req, res) => {
+  router.put("/outgoing/:id", authenticate, checkPermission('Correspondence', 'Edit'), validateParams(idParamSchema), asyncHandler(async (req, res) => {
     const typedReq = req as unknown as any;
     const id = typedReq.params.id as string;
     const body = { ...typedReq.body };
@@ -244,19 +265,19 @@ export const createCorrespondenceRoutes = (
     
     await CorrespondenceService.updateOutgoing(id, validation.data);
     
-    await AuthService.logAudit(username, "Update", "Outgoing Letters", `Updated letter ID: ${id}`);
+    await AuthService.logAudit(username, "UPDATE", "Correspondence", `Updated outgoing letter ID: ${id}`);
         
     res.json({ success: true });
   }));
 
-  router.delete("/outgoing/:id", authenticate, checkPermission('Correspondence', 'Delete'), asyncHandler(async (req, res) => {
+  router.delete("/outgoing/:id", authenticate, checkPermission('Correspondence', 'Delete'), validateParams(idParamSchema), asyncHandler(async (req, res) => {
     const typedReq = req as unknown as any;
     const id = typedReq.params.id as string;
     const username = typedReq.user.username;
     
     await CorrespondenceService.deleteOutgoing(id);
     
-    await AuthService.logAudit(username, "Delete", "Outgoing Letters", `Deleted letter ID: ${id}`);
+    await AuthService.logAudit(username, "DELETE", "Correspondence", `Deleted outgoing letter ID: ${id}`);
         
     res.json({ success: true });
   }));

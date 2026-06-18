@@ -19,6 +19,7 @@ export class CorrespondenceService {
     `;
     
     const qb = new QueryBuilder(baseQueryString)
+      .where('i.deleted_at IS NULL')
       .where('i.is_archived = ?', isArchived)
       .whereIf(!!status, 'i.status = ?', status)
       .whereIf(!!priority, 'i.priority = ?', priority)
@@ -84,18 +85,23 @@ export class CorrespondenceService {
     );
 
     // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent('incoming_correspondence.created', {
-      id: result.lastInsertRowid,
-      sequence_number,
-      subject,
-      sender_entity
-    });
+    try {
+      await N8nService.sendEvent('incoming_correspondence.created', {
+        id: result.lastInsertRowid,
+        sequence_number,
+        subject,
+        sender_entity
+      });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch incoming_correspondence.created event:', err);
+    }
 
     return { id: result.lastInsertRowid, sequence_number };
   }
 
   static async updateStatus(type: string, id: string | number, newStatus: string, notes: string, userId: string | number) {
-    const table = this.db.validateIdentifier(type === 'Outgoing' ? 'outgoing_letters' : 'incoming_correspondence');
+    const table = this.db.validateIdentifier(type === 'outgoing' ? 'outgoing_letters' : 'incoming_correspondence');
+    const dbType = type === 'incoming' ? 'Incoming' : 'Outgoing';
 
     // Captured inside the transaction for the post-commit webhook dispatch.
     let oldStatus: any = null;
@@ -109,7 +115,7 @@ export class CorrespondenceService {
       await this.db.prepare(`
         INSERT INTO correspondence_status_history (correspondence_id, correspondence_type, old_status, new_status, changed_by, notes)
         VALUES (?::uuid, ?::text, ?::text, ?::text, ?::uuid, ?::text)
-      `).run(id, type, oldRecord.status, newStatus, userId, notes);
+      `).run(id, dbType, oldRecord.status, newStatus, userId, notes);
 
       oldStatus = oldRecord.status;
     });
@@ -154,7 +160,7 @@ export class CorrespondenceService {
   }
 
   static async archive(type: string, id: string | number) {
-    const table = this.db.validateIdentifier(type === 'Incoming' ? 'incoming_correspondence' : 'outgoing_letters');
+    const table = this.db.validateIdentifier(type === 'incoming' ? 'incoming_correspondence' : 'outgoing_letters');
     await this.db.prepare(`UPDATE ${table} SET is_archived = 1, status = 'Archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?::uuid`).run(id);
   }
 
@@ -167,9 +173,10 @@ export class CorrespondenceService {
     // We instantiate generic QueryBuilders assuming filtering applies equally
     // Since we handle combined differently, we conditionally build queries.
 
-    if (type === 'Incoming') {
+    if (type === 'incoming') {
       const qb = new QueryBuilder(`FROM incoming_correspondence`)
-        .where("is_archived = 1");
+        .where("is_archived = 1")
+        .where("deleted_at IS NULL");
       if (search) {
         qb.where("(sequence_number LIKE ? OR subject LIKE ? OR sender_entity LIKE ?)", `%${search}%`, `%${search}%`, `%${search}%`);
       }
@@ -180,9 +187,10 @@ export class CorrespondenceService {
       const data = await this.db.prepare(`SELECT *, 'Incoming' as type, sender_entity as entity ${qb.buildDataQuery()}`).all(...qb.buildParams(pagination));
       return { data, pagination: computePaginationMeta(page, pageSize, countRes?.total || 0) };
       
-    } else if (type === 'Outgoing') {
+    } else if (type === 'outgoing') {
       const qb = new QueryBuilder(`FROM outgoing_letters`)
-        .where("is_archived = 1");
+        .where("is_archived = 1")
+        .where("deleted_at IS NULL");
       if (search) {
         qb.where("(sequence_number LIKE ? OR subject LIKE ? OR recipient_entity LIKE ?)", `%${search}%`, `%${search}%`, `%${search}%`);
       }
@@ -194,38 +202,47 @@ export class CorrespondenceService {
       return { data, pagination: computePaginationMeta(page, pageSize, countRes?.total || 0) };
       
     } else {
-      // Combined Logic
-      const qb = new QueryBuilder("").where("is_archived = 1");
-      if (search) {
-         const s = `%${search}%`;
-         qb.where("(sequence_number LIKE ? OR subject LIKE ? OR search_column LIKE ?)", s, s, s);
-      }
+      // Combined Logic: build separate QueryBuilders for each table to avoid fragile string replacement
+      const incQb = new QueryBuilder(`FROM incoming_correspondence`)
+        .where("is_archived = 1")
+        .where("deleted_at IS NULL");
+      const outQb = new QueryBuilder(`FROM outgoing_letters`)
+        .where("is_archived = 1")
+        .where("deleted_at IS NULL");
       
-      const whereBlock = qb.getWhereBlock();
-      const incWhere = whereBlock.replace('search_column', 'sender_entity');
-      const outWhere = whereBlock.replace('search_column', 'recipient_entity');
+      if (search) {
+        const s = `%${search}%`;
+        incQb.where("(sequence_number LIKE ? OR subject LIKE ? OR sender_entity LIKE ?)", s, s, s);
+        outQb.where("(sequence_number LIKE ? OR subject LIKE ? OR recipient_entity LIKE ?)", s, s, s);
+      }
 
-      const incQuery = `SELECT id, sequence_number, subject, sender_entity as entity, updated_at, 'Incoming' as type, is_archived FROM incoming_correspondence ${incWhere}`;
-      const outQuery = `SELECT id, sequence_number, subject, recipient_entity as entity, updated_at, 'Outgoing' as type, is_archived FROM outgoing_letters ${outWhere}`;
+      const incQuery = `SELECT id, sequence_number, subject, sender_entity as entity, updated_at, 'Incoming' as type, is_archived ${incQb.buildDataQuery()}`;
+      const outQuery = `SELECT id, sequence_number, subject, recipient_entity as entity, updated_at, 'Outgoing' as type, is_archived ${outQb.buildDataQuery()}`;
       
       query = `SELECT * FROM (${incQuery} UNION ALL ${outQuery}) as combined`;
       countQuery = `SELECT COUNT(*) as total FROM (${incQuery} UNION ALL ${outQuery}) as combined`;
       
-      const countRes = await this.db.prepare(countQuery).get(...qb.buildParams(), ...qb.buildParams()); // Apply to both halves
-      const pagination = qb.paginate(page, pageSize);
-      // We pass the parameters twice because of the UNION
-      const data = await this.db.prepare(`${query} ORDER BY updated_at DESC LIMIT ? OFFSET ?`).all(...qb.buildParams(), ...qb.buildParams(), pagination.limit, pagination.offset);
+      const allParams = [...incQb.buildParams(), ...outQb.buildParams()];
+      const countRes = await this.db.prepare(countQuery).get(...allParams);
+      
+      const effectivePageSize = Number(pageSize) || 15;
+      const effectivePage = Number(page) || 1;
+      const limit = effectivePageSize;
+      const offset = (effectivePage - 1) * effectivePageSize;
+      
+      const data = await this.db.prepare(`${query} ORDER BY updated_at DESC LIMIT ? OFFSET ?`).all(...allParams, limit, offset);
       
       return {
         data,
-        pagination: computePaginationMeta(page, pageSize, countRes?.total || 0)
+        pagination: computePaginationMeta(effectivePage, effectivePageSize, countRes?.total || 0)
       };
     }
   }
 
   static async getAttachments(type: string, id: string | number) {
+    const dbType = type === 'incoming' ? 'Incoming' : 'Outgoing';
     return await this.db.prepare("SELECT id, file_name, file_type, uploaded_at, description FROM correspondence_attachments WHERE correspondence_type = ? AND correspondence_id = ?")
-      .all(type, id);
+      .all(dbType, id);
   }
 
   static async addAttachment(data: any, userId: string | number) {
@@ -261,6 +278,7 @@ export class CorrespondenceService {
 
   static async getDetails(type: string, id: string | number) {
     const table = this.db.validateIdentifier(type === 'outgoing' ? 'outgoing_letters' : 'incoming_correspondence');
+    const dbType = type === 'incoming' ? 'Incoming' : 'Outgoing';
     
     let record;
     if (type === 'outgoing') {
@@ -284,8 +302,8 @@ export class CorrespondenceService {
     if (!record) throw new NotFoundError("Record not found");
 
     const [attachments, history, referrals] = await Promise.all([
-      this.db.prepare("SELECT id, file_name, file_type, uploaded_at, description FROM correspondence_attachments WHERE correspondence_type = ? AND correspondence_id = ?").all(type, id),
-      this.db.prepare("SELECT h.*, u.name as user_name FROM correspondence_status_history h LEFT JOIN users u ON h.changed_by = u.id WHERE correspondence_type = ? AND correspondence_id = ? ORDER BY h.change_date DESC").all(type, id),
+      this.db.prepare("SELECT id, file_name, file_type, uploaded_at, description FROM correspondence_attachments WHERE correspondence_type = ? AND correspondence_id = ?").all(dbType, id),
+      this.db.prepare("SELECT h.*, u.name as user_name FROM correspondence_status_history h LEFT JOIN users u ON h.changed_by = u.id WHERE correspondence_type = ? AND correspondence_id = ? ORDER BY h.change_date DESC").all(dbType, id),
       type !== 'outgoing'
         ? this.db.prepare(`
             SELECT r.*, u1.name as from_user, u2.name as to_user, d.name_ar as to_dept
@@ -306,10 +324,10 @@ export class CorrespondenceService {
 
   static async getOutgoing(page = 1, pageSize = 10) {
     const offset = (page - 1) * pageSize;
-    const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM outgoing_letters`).get<{ total: number }>();
+    const countRes = await this.db.prepare(`SELECT COUNT(*) as total FROM outgoing_letters WHERE deleted_at IS NULL`).get<{ total: number }>();
     const total = countRes?.total || 0;
 
-    const data = await this.db.prepare("SELECT id, sequence_number, letter_date, recipient_entity, subject, classification, sending_method, status, is_archived, created_at, updated_at, created_by FROM outgoing_letters ORDER BY created_at DESC LIMIT ? OFFSET ?").all(pageSize, offset);
+    const data = await this.db.prepare("SELECT id, sequence_number, letter_date, recipient_entity, subject, classification, sending_method, status, is_archived, created_at, updated_at, created_by FROM outgoing_letters WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?").all(pageSize, offset);
     
     return {
       data,
@@ -334,81 +352,110 @@ export class CorrespondenceService {
     const result = await stmt.run(sequence_number, letter_date, recipient_entity, subject, classification, sending_method, attachment_file, userId);
     
     // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent('outgoing_correspondence.created', {
-      id: result.lastInsertRowid,
-      sequence_number,
-      subject,
-      recipient_entity
-    });
+    try {
+      await N8nService.sendEvent('outgoing_correspondence.created', {
+        id: result.lastInsertRowid,
+        sequence_number,
+        subject,
+        recipient_entity
+      });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch outgoing_correspondence.created event:', err);
+    }
 
     return { id: result.lastInsertRowid, sequence_number };
   }
 
   static async updateOutgoing(id: string | number, data: any) {
-    const { letter_date, recipient_entity, subject, classification, sending_method, attachment_file } = data;
-    
-    if (attachment_file !== undefined) {
-      await this.db.prepare(`
-        UPDATE outgoing_letters 
-        SET letter_date = ?::text, recipient_entity = ?::text, subject = ?::text, classification = ?::text, sending_method = ?::text, attachment_file = ?::text
-        WHERE id = ?::uuid
-      `).run(letter_date, recipient_entity, subject, classification, sending_method, attachment_file, id);
-    } else {
-      await this.db.prepare(`
-        UPDATE outgoing_letters 
-        SET letter_date = ?::text, recipient_entity = ?::text, subject = ?::text, classification = ?::text, sending_method = ?::text
-        WHERE id = ?::uuid
-      `).run(letter_date, recipient_entity, subject, classification, sending_method, id);
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (data.letter_date !== undefined) { fields.push('letter_date = ?::text'); values.push(data.letter_date); }
+    if (data.recipient_entity !== undefined) { fields.push('recipient_entity = ?::text'); values.push(data.recipient_entity); }
+    if (data.subject !== undefined) { fields.push('subject = ?::text'); values.push(data.subject); }
+    if (data.classification !== undefined) { fields.push('classification = ?::text'); values.push(data.classification); }
+    if (data.sending_method !== undefined) { fields.push('sending_method = ?::text'); values.push(data.sending_method); }
+    if (data.attachment_file !== undefined) { fields.push('attachment_file = ?::text'); values.push(data.attachment_file); }
+
+    if (fields.length === 0) return;
+
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    const result = await this.db.prepare(`UPDATE outgoing_letters SET ${fields.join(', ')} WHERE id = ?::uuid AND deleted_at IS NULL`).run(...values, id);
+
+    if (result.changes === 0) {
+      throw new NotFoundError('Outgoing correspondence record not found');
     }
 
     // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent('outgoing_correspondence.updated', {
-      id,
-      updates: data
-    });
+    try {
+      await N8nService.sendEvent('outgoing_correspondence.updated', { id, updates: data });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch outgoing_correspondence.updated event:', err);
+    }
   }
 
   static async deleteOutgoing(id: string | number) {
     // Soft-delete on the soft-delete table instead of hard-deleting (finding
     // 1.32 → 2.32). `outgoing_letters` carries a `deleted_at` column; mark the
     // row deleted rather than physically removing it.
-    await this.db.prepare("UPDATE outgoing_letters SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?::uuid AND deleted_at IS NULL").run(id);
+    const result = await this.db.prepare("UPDATE outgoing_letters SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?::uuid AND deleted_at IS NULL").run(id);
+
+    if (result.changes === 0) {
+      throw new NotFoundError('Outgoing correspondence record not found');
+    }
 
     // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent('outgoing_correspondence.deleted', {
-      id
-    });
+    try {
+      await N8nService.sendEvent('outgoing_correspondence.deleted', { id });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch outgoing_correspondence.deleted event:', err);
+    }
   }
 
   static async updateIncoming(id: string | number, data: any) {
-    const { 
-      letter_number, sender_entity, sender_entity_type, subject, letter_date, 
-      receipt_date, classification, priority, method, receiving_dept_id, 
-      assigned_dept_id, assigned_user_id, follow_up_required, follow_up_date, 
-      response_required, response_due_date, notes 
-    } = data;
+    const fieldMap: Record<string, string> = {
+      letter_number: '?::text', sender_entity: '?::text', sender_entity_type: '?::text',
+      subject: '?::text', letter_date: '?::text', receipt_date: '?::text',
+      classification: '?::text', priority: '?::text', method: '?::text',
+      receiving_dept_id: '?::uuid', assigned_dept_id: '?::uuid', assigned_user_id: '?::uuid',
+      follow_up_date: '?::text', response_due_date: '?::text', notes: '?::text',
+    };
 
-    await this.db.prepare(`
-      UPDATE incoming_correspondence SET 
-        letter_number = ?::text, sender_entity = ?::text, sender_entity_type = ?::text, subject = ?::text, 
-        letter_date = ?::text, receipt_date = ?::text, classification = ?::text, priority = ?::text, method = ?::text, 
-        receiving_dept_id = ?::uuid, assigned_dept_id = ?::uuid, assigned_user_id = ?::uuid, 
-        follow_up_required = ?::integer, follow_up_date = ?::text, response_required = ?::integer, response_due_date = ?::text, 
-        notes = ?::text, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?::uuid
-    `).run(
-      letter_number, sender_entity, sender_entity_type, subject, 
-      letter_date, receipt_date, classification, priority, method, 
-      receiving_dept_id, assigned_dept_id, assigned_user_id, 
-      follow_up_required ? 1 : 0, follow_up_date, response_required ? 1 : 0, response_due_date, 
-      notes, id
-    );
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    for (const [key, cast] of Object.entries(fieldMap)) {
+      if (data[key] !== undefined) {
+        fields.push(`${key} = ${cast}`);
+        values.push(data[key]);
+      }
+    }
+
+    // Boolean fields stored as integer
+    if (data.follow_up_required !== undefined) {
+      fields.push('follow_up_required = ?::integer');
+      values.push(data.follow_up_required ? 1 : 0);
+    }
+    if (data.response_required !== undefined) {
+      fields.push('response_required = ?::integer');
+      values.push(data.response_required ? 1 : 0);
+    }
+
+    if (fields.length === 0) return;
+
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    const result = await this.db.prepare(`UPDATE incoming_correspondence SET ${fields.join(', ')} WHERE id = ?::uuid AND deleted_at IS NULL`).run(...values, id);
+
+    if (result.changes === 0) {
+      throw new NotFoundError('Incoming correspondence record not found');
+    }
 
     // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent('incoming_correspondence.updated', {
-      id,
-      updates: data
-    });
+    try {
+      await N8nService.sendEvent('incoming_correspondence.updated', { id, updates: data });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch incoming_correspondence.updated event:', err);
+    }
   }
 
   static async deleteIncoming(id: string | number) {
@@ -418,15 +465,23 @@ export class CorrespondenceService {
     // physically removing them. Related rows in non-soft-delete tables
     // (referrals/links/status history) are preserved alongside the soft-deleted
     // parent for auditability.
+    let changes = 0;
     await this.db.transaction(async () => {
       await this.db.prepare("UPDATE correspondence_attachments SET deleted_at = CURRENT_TIMESTAMP WHERE correspondence_type = 'Incoming' AND correspondence_id = ? AND deleted_at IS NULL").run(id);
-      await this.db.prepare("UPDATE incoming_correspondence SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+      const result = await this.db.prepare("UPDATE incoming_correspondence SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+      changes = result.changes;
     });
 
+    if (changes === 0) {
+      throw new NotFoundError('Incoming correspondence record not found');
+    }
+
     // --- AUTOMATION: Send event to n8n ---
-    await N8nService.sendEvent('incoming_correspondence.deleted', {
-      id
-    });
+    try {
+      await N8nService.sendEvent('incoming_correspondence.deleted', { id });
+    } catch (err) {
+      console.error('[Automation Error] Failed to dispatch incoming_correspondence.deleted event:', err);
+    }
   }
 }
 

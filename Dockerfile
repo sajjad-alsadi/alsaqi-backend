@@ -21,7 +21,8 @@ COPY tsconfig.json ./
 RUN npm run build
 
 # ─── Stage 2: Production ────────────────────────────────────────────────────
-FROM node:20-slim AS production
+# Pin to specific minor version for reproducible builds. Update periodically.
+FROM node:20.19-slim AS production
 
 WORKDIR /app
 

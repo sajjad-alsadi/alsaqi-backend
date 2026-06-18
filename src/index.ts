@@ -271,6 +271,19 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
       checks.redis = 'unavailable';
     }
 
+    // Check BullMQ queue system (only if enabled)
+    try {
+      const { queueManager } = await import('./queues/queueManager.js');
+      if (queueManager.isInitialized) {
+        checks.queues = 'ok';
+      } else {
+        checks.queues = 'not_initialized';
+        // Queues are optional — don't mark unhealthy if intentionally disabled
+      }
+    } catch (e) {
+      checks.queues = 'unavailable';
+    }
+
     const status = healthy ? 200 : 503;
     res.status(status).json({ status: healthy ? 'ready' : 'degraded', checks, timestamp: new Date().toISOString() });
   };

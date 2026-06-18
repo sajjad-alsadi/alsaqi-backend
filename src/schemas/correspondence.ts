@@ -33,8 +33,8 @@ export const MAX_FILENAME_LENGTH = 255;
  */
 export const correspondenceAttachmentSchema = z.object({
   correspondence_id: z.string().uuid({ message: 'correspondence_id must be a valid UUID' }),
-  correspondence_type: z.enum(['incoming', 'outgoing'], {
-    message: 'correspondence_type must be "incoming" or "outgoing"',
+  correspondence_type: z.enum(['Incoming', 'Outgoing'], {
+    message: 'correspondence_type must be "Incoming" or "Outgoing"',
   }),
   file_name: z
     .string()

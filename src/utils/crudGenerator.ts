@@ -8,7 +8,7 @@ import { AuditPlanService } from '../services/AuditPlanService';
 import { RiskService } from '../services/RiskService';
 import { registerRoutes } from './routeRegistry';
 import { parsePaginationParams } from './paginationService';
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 
 /**
@@ -137,11 +137,13 @@ export const createCrudRoutes = (
           for (const key of Object.keys(files)) {
             if (body[key] && typeof body[key] === 'string' && body[key].startsWith('/uploads/')) {
               const filePath = path.join(process.cwd(), body[key]);
-              fs.unlink(filePath, (unlinkErr) => {
-                if (unlinkErr && unlinkErr.code !== 'ENOENT') {
+              try {
+                await fs.unlink(filePath);
+              } catch (unlinkErr: any) {
+                if (unlinkErr.code !== 'ENOENT') {
                   console.error(`[DB Failure Cleanup] Failed to delete orphaned file: ${filePath}`, unlinkErr);
                 }
-              });
+              }
             }
           }
         }
@@ -233,11 +235,13 @@ export const createCrudRoutes = (
           for (const key of Object.keys(files)) {
             if (body[key] && typeof body[key] === 'string' && body[key].startsWith('/uploads/')) {
               const filePath = path.join(process.cwd(), body[key]);
-              fs.unlink(filePath, (unlinkErr) => {
-                if (unlinkErr && unlinkErr.code !== 'ENOENT') {
+              try {
+                await fs.unlink(filePath);
+              } catch (unlinkErr: any) {
+                if (unlinkErr.code !== 'ENOENT') {
                   console.error(`[DB Failure Cleanup] Failed to delete orphaned file: ${filePath}`, unlinkErr);
                 }
-              });
+              }
             }
           }
         }

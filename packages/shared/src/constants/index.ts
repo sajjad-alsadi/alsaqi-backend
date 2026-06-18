@@ -109,3 +109,7 @@ export const PERMISSION_MODULE_MAP: Record<string, string> = {
   Departments: 'Departments',
   Recommendations: 'Recommendations',
 };
+
+// ─── Correspondence Module Constants ────────────────────────────────────────────
+
+export * from './correspondence';

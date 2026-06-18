@@ -238,10 +238,16 @@ export class AuthService {
     if (authoritativeCount >= lockThreshold) {
       // Commit the lockout state first and independently, so it is preserved even if the
       // subsequent notification transaction fails and rolls back (Req 8.5).
-      await db.prepare("UPDATE users SET locked_until = ?::timestamp WHERE id = ?::uuid")
-        .run(new Date(Date.now() + 15 * 60 * 1000).toISOString(), user.id);
+      // Use a conditional UPDATE so that concurrent attempts don't both trigger notifications:
+      // only the request that actually transitions the user into locked state will notify admins.
+      const lockResult = await db.prepare(
+        "UPDATE users SET locked_until = ?::timestamp WHERE id = ?::uuid AND (locked_until IS NULL OR locked_until < CURRENT_TIMESTAMP) RETURNING id"
+      ).get(new Date(Date.now() + 15 * 60 * 1000).toISOString(), user.id);
 
-      await AuthService.notifyAdminsOfLockout(user, ipAddress);
+      // Only notify if this request actually performed the lockout transition
+      if (lockResult) {
+        await AuthService.notifyAdminsOfLockout(user, ipAddress);
+      }
     }
   }
 
