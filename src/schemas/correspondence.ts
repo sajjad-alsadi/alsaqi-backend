@@ -27,14 +27,22 @@ export const MAX_FILENAME_LENGTH = 255;
 
 /**
  * Schema for validating file upload metadata on POST /api/correspondence/attachments.
- * Validates file size, filename length, and MIME type against an allowlist.
  *
- * Requirements: 6.4
+ * Casing convention (finding 1.1 -> 2.1): `correspondence_type` is lowercase at the HTTP
+ * edge (matching the lowercase `:type` path params); `CorrespondenceService.addAttachment`
+ * normalizes it to the capitalized `Incoming`/`Outgoing` stored in the column before the insert.
+ *
+ * The schema validates the fields actually persisted by the DB insert — `file_type` (MIME,
+ * checked against the allowlist) and `file_data` — rather than the unpersisted
+ * `file_size`/`mime_type`. The route registers this schema WITHOUT `.passthrough()`, so any
+ * column not declared here is stripped and never reaches the insert.
+ *
+ * Requirements: 6.4, 1.1, 2.1
  */
 export const correspondenceAttachmentSchema = z.object({
   correspondence_id: z.string().uuid({ message: 'correspondence_id must be a valid UUID' }),
-  correspondence_type: z.enum(['Incoming', 'Outgoing'], {
-    message: 'correspondence_type must be "Incoming" or "Outgoing"',
+  correspondence_type: z.enum(['incoming', 'outgoing'], {
+    message: 'correspondence_type must be "incoming" or "outgoing"',
   }),
   file_name: z
     .string()
@@ -42,16 +50,10 @@ export const correspondenceAttachmentSchema = z.object({
     .max(MAX_FILENAME_LENGTH, {
       message: `file_name must not exceed ${MAX_FILENAME_LENGTH} characters`,
     }),
-  file_size: z
-    .number({ message: 'file_size must be a number' })
-    .int({ message: 'file_size must be an integer' })
-    .positive({ message: 'file_size must be positive' })
-    .max(MAX_FILE_SIZE, {
-      message: `file_size must not exceed ${MAX_FILE_SIZE} bytes (10 MB)`,
-    }),
-  mime_type: z.enum(ALLOWED_MIME_TYPES, {
-    message: `mime_type must be one of: ${ALLOWED_MIME_TYPES.join(', ')}`,
+  file_type: z.enum(ALLOWED_MIME_TYPES, {
+    message: `file_type must be one of: ${ALLOWED_MIME_TYPES.join(', ')}`,
   }),
+  file_data: z.string().min(1, { message: 'file_data is required' }),
   description: z.string().max(500).optional().nullable(),
 });
 

@@ -4,6 +4,7 @@ import { QueryBuilder } from '../utils/QueryBuilder';
 import { N8nService } from '../utils/n8nService';
 import { NumberingService } from './NumberingService';
 import { computePaginationMeta } from '../utils/paginationService';
+import logger from '../utils/logger';
 
 export class CorrespondenceService {
   private static db = db;
@@ -93,7 +94,7 @@ export class CorrespondenceService {
         sender_entity
       });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch incoming_correspondence.created event:', err);
+      logger.error('[Automation Error] Failed to dispatch incoming_correspondence.created event:', err);
     }
 
     return { id: result.lastInsertRowid, sequence_number };
@@ -107,10 +108,10 @@ export class CorrespondenceService {
     let oldStatus: any = null;
 
     await this.db.transaction(async () => {
-      const oldRecord = await this.db.prepare(`SELECT status FROM ${table} WHERE id = ?`).get(id);
+      const oldRecord = await this.db.prepare(`SELECT status FROM ${table} WHERE id = ? AND deleted_at IS NULL`).get(id);
       if (!oldRecord) throw new NotFoundError("Record not found");
 
-      await this.db.prepare(`UPDATE ${table} SET status = ?::text, updated_at = CURRENT_TIMESTAMP WHERE id = ?::uuid`).run(newStatus, id);
+      await this.db.prepare(`UPDATE ${table} SET status = ?::text, updated_at = CURRENT_TIMESTAMP WHERE id = ?::uuid AND deleted_at IS NULL`).run(newStatus, id);
       
       await this.db.prepare(`
         INSERT INTO correspondence_status_history (correspondence_id, correspondence_type, old_status, new_status, changed_by, notes)
@@ -132,7 +133,7 @@ export class CorrespondenceService {
         changedBy: userId
       });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch correspondence.status_changed event:', err);
+      logger.error('[Automation Error] Failed to dispatch correspondence.status_changed event:', err);
     }
 
     return { oldStatus };
@@ -161,7 +162,15 @@ export class CorrespondenceService {
 
   static async archive(type: string, id: string | number) {
     const table = this.db.validateIdentifier(type === 'incoming' ? 'incoming_correspondence' : 'outgoing_letters');
-    await this.db.prepare(`UPDATE ${table} SET is_archived = 1, status = 'Archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?::uuid`).run(id);
+    // Exclude soft-deleted rows and treat a no-op UPDATE as a 404, matching the
+    // updateOutgoing/updateIncoming/deleteOutgoing/deleteIncoming sibling pattern
+    // (finding 1.3 -> 2.3): a soft-deleted row must not be re-archived, and
+    // archiving a missing id must not silently succeed.
+    const result = await this.db.prepare(`UPDATE ${table} SET is_archived = 1, status = 'Archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?::uuid AND deleted_at IS NULL`).run(id);
+
+    if (result.changes === 0) {
+      throw new NotFoundError('Correspondence record not found');
+    }
   }
 
   static async getArchive(filters: any) {
@@ -225,16 +234,18 @@ export class CorrespondenceService {
       const allParams = [...incQb.buildParams(), ...outQb.buildParams()];
       const countRes = await this.db.prepare(countQuery).get(...allParams);
       
-      const effectivePageSize = Number(pageSize) || 15;
-      const effectivePage = Number(page) || 1;
-      const limit = effectivePageSize;
-      const offset = (effectivePage - 1) * effectivePageSize;
+      // Finding 1.5 -> 2.5: use the same (route-clamped) numeric page/pageSize as the
+      // single-type branches above instead of re-deriving an UNBOUNDED `Number(pageSize) || 15`.
+      // The effective LIMIT is therefore always bounded by whatever parsePaginationParams clamped
+      // at the edge, consistently across all three branches.
+      const limit = pageSize;
+      const offset = (page - 1) * pageSize;
       
       const data = await this.db.prepare(`${query} ORDER BY updated_at DESC LIMIT ? OFFSET ?`).all(...allParams, limit, offset);
       
       return {
         data,
-        pagination: computePaginationMeta(effectivePage, effectivePageSize, countRes?.total || 0)
+        pagination: computePaginationMeta(page, pageSize, countRes?.total || 0)
       };
     }
   }
@@ -247,10 +258,14 @@ export class CorrespondenceService {
 
   static async addAttachment(data: any, userId: string | number) {
     const { correspondence_id, correspondence_type, file_name, file_type, file_data, description } = data;
+    // Normalize the lowercase edge value ('incoming'/'outgoing') to the capitalized
+    // 'Incoming'/'Outgoing' stored in the correspondence_type column, matching the
+    // dbType mapping used in updateStatus/getAttachments/getDetails (finding 1.1 -> 2.1).
+    const dbType = correspondence_type === 'incoming' ? 'Incoming' : 'Outgoing';
     await this.db.prepare(`
       INSERT INTO correspondence_attachments (correspondence_id, correspondence_type, file_name, file_type, file_data, description, uploaded_by)
       VALUES (?::uuid, ?::text, ?::text, ?::text, ?::text, ?::text, ?::uuid)
-    `).run(correspondence_id, correspondence_type, file_name, file_type, file_data, description, userId);
+    `).run(correspondence_id, dbType, file_name, file_type, file_data, description, userId);
   }
 
   static async getStats() {
@@ -360,7 +375,7 @@ export class CorrespondenceService {
         recipient_entity
       });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch outgoing_correspondence.created event:', err);
+      logger.error('[Automation Error] Failed to dispatch outgoing_correspondence.created event:', err);
     }
 
     return { id: result.lastInsertRowid, sequence_number };
@@ -390,7 +405,7 @@ export class CorrespondenceService {
     try {
       await N8nService.sendEvent('outgoing_correspondence.updated', { id, updates: data });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch outgoing_correspondence.updated event:', err);
+      logger.error('[Automation Error] Failed to dispatch outgoing_correspondence.updated event:', err);
     }
   }
 
@@ -408,7 +423,7 @@ export class CorrespondenceService {
     try {
       await N8nService.sendEvent('outgoing_correspondence.deleted', { id });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch outgoing_correspondence.deleted event:', err);
+      logger.error('[Automation Error] Failed to dispatch outgoing_correspondence.deleted event:', err);
     }
   }
 
@@ -454,7 +469,7 @@ export class CorrespondenceService {
     try {
       await N8nService.sendEvent('incoming_correspondence.updated', { id, updates: data });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch incoming_correspondence.updated event:', err);
+      logger.error('[Automation Error] Failed to dispatch incoming_correspondence.updated event:', err);
     }
   }
 
@@ -480,7 +495,7 @@ export class CorrespondenceService {
     try {
       await N8nService.sendEvent('incoming_correspondence.deleted', { id });
     } catch (err) {
-      console.error('[Automation Error] Failed to dispatch incoming_correspondence.deleted event:', err);
+      logger.error('[Automation Error] Failed to dispatch incoming_correspondence.deleted event:', err);
     }
   }
 }

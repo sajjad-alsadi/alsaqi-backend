@@ -3,8 +3,6 @@ import { describe, it, expect } from 'vitest';
 import {
   correspondenceAttachmentSchema,
   ALLOWED_MIME_TYPES,
-  MAX_FILE_SIZE,
-  MAX_FILENAME_LENGTH,
 } from './correspondence';
 import { dashboardStatsQuerySchema, myTasksQuerySchema } from './dashboard';
 import {
@@ -21,12 +19,14 @@ import {
 } from './crudFilters';
 
 describe('Correspondence Attachment Schema', () => {
+  // Reconciled contract (finding 1.1 -> 2.1): lowercase correspondence_type at the edge, and
+  // the persisted columns (file_type MIME + allowlist, file_data) are what is validated.
   const validAttachment = {
     correspondence_id: '550e8400-e29b-41d4-a716-446655440000',
     correspondence_type: 'incoming' as const,
     file_name: 'report.pdf',
-    file_size: 1024,
-    mime_type: 'application/pdf' as const,
+    file_type: 'application/pdf' as const,
+    file_data: 'JVBERi0xLjQK',
   };
 
   it('accepts valid attachment data', () => {
@@ -42,34 +42,34 @@ describe('Correspondence Attachment Schema', () => {
     expect(result.success).toBe(true);
   });
 
-  it('rejects file size exceeding 10 MB', () => {
+  it('accepts a lowercase outgoing correspondence_type', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      file_size: MAX_FILE_SIZE + 1,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('accepts file size exactly at 10 MB limit', () => {
-    const result = correspondenceAttachmentSchema.safeParse({
-      ...validAttachment,
-      file_size: MAX_FILE_SIZE,
+      correspondence_type: 'outgoing',
     });
     expect(result.success).toBe(true);
   });
 
-  it('rejects zero file size', () => {
+  it('rejects a capitalized correspondence_type (lowercase-at-edge convention)', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      file_size: 0,
+      correspondence_type: 'Incoming',
     });
     expect(result.success).toBe(false);
   });
 
-  it('rejects negative file size', () => {
+  it('rejects an invalid correspondence_type', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      file_size: -100,
+      correspondence_type: 'invalid',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects invalid correspondence_id (not UUID)', () => {
+    const result = correspondenceAttachmentSchema.safeParse({
+      ...validAttachment,
+      correspondence_id: 'not-a-uuid',
     });
     expect(result.success).toBe(false);
   });
@@ -85,7 +85,7 @@ describe('Correspondence Attachment Schema', () => {
   it('accepts filename at exactly 255 characters', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      file_name: 'a'.repeat(254) + '.pdf'.slice(0, 1), // 255 chars
+      file_name: 'a'.repeat(255),
     });
     expect(result.success).toBe(true);
   });
@@ -98,52 +98,46 @@ describe('Correspondence Attachment Schema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects disallowed MIME type', () => {
+  it('rejects disallowed file_type (MIME)', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      mime_type: 'application/javascript',
+      file_type: 'application/javascript',
     });
     expect(result.success).toBe(false);
   });
 
-  it('rejects executable MIME type', () => {
+  it('rejects executable file_type (MIME)', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      mime_type: 'application/x-executable',
+      file_type: 'application/x-msdownload',
     });
     expect(result.success).toBe(false);
   });
 
-  it('accepts all allowed MIME types', () => {
+  it('accepts all allowed file_type (MIME) values', () => {
     for (const mimeType of ALLOWED_MIME_TYPES) {
       const result = correspondenceAttachmentSchema.safeParse({
         ...validAttachment,
-        mime_type: mimeType,
+        file_type: mimeType,
       });
       expect(result.success).toBe(true);
     }
   });
 
-  it('rejects invalid correspondence_id (not UUID)', () => {
+  it('rejects a missing file_data', () => {
     const result = correspondenceAttachmentSchema.safeParse({
-      ...validAttachment,
-      correspondence_id: 'not-a-uuid',
+      correspondence_id: validAttachment.correspondence_id,
+      correspondence_type: validAttachment.correspondence_type,
+      file_name: validAttachment.file_name,
+      file_type: validAttachment.file_type,
     });
     expect(result.success).toBe(false);
   });
 
-  it('rejects invalid correspondence_type', () => {
+  it('rejects an empty file_data', () => {
     const result = correspondenceAttachmentSchema.safeParse({
       ...validAttachment,
-      correspondence_type: 'invalid',
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects non-integer file size', () => {
-    const result = correspondenceAttachmentSchema.safeParse({
-      ...validAttachment,
-      file_size: 1024.5,
+      file_data: '',
     });
     expect(result.success).toBe(false);
   });

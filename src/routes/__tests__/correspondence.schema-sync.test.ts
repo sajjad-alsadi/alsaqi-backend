@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import * as fc from 'fast-check';
 import { z } from 'zod';
 import {
@@ -8,6 +8,8 @@ import {
   METHODS,
   ENTITY_TYPES,
   LINK_TYPES,
+  INCOMING_STATUSES,
+  OUTGOING_STATUSES,
 } from '@alsaqi/shared';
 import {
   CreateIncomingCorrespondenceSchema,
@@ -16,56 +18,47 @@ import {
 } from '@alsaqi/shared';
 
 /**
- * Property 5: Shared validator and route schema synchronization
+ * Schema synchronization (finding 1.7 -> 2.7)
  *
- * For each enum field defined in the correspondence module, the set of values
- * accepted by the route-level Zod schema SHALL be exactly equal to the set of
- * values accepted by the corresponding shared validator schema.
+ * The route-level Zod schemas defined in `src/routes/correspondence.ts` MUST stay
+ * in lock-step with the single source of truth — the `@alsaqi/shared` enum constants
+ * (and, where applicable, the shared validator schemas). This test imports the REAL
+ * exported route schemas rather than reconstructing local copies, so any drift in a
+ * real route schema (e.g. editing a `z.enum(...)`) now fails this test (1.7 -> 2.7).
  *
- * Since both schemas import from the same constant arrays, this test verifies:
- * 1. Both schemas use z.enum() with the same constant arrays
- * 2. For any value from the allowed set, both schemas accept it
- * 3. For any value NOT in the allowed set, both schemas reject it
+ * Coverage:
+ *  - incoming/outgoing/link create schemas vs the shared CREATE validators + constants
+ *  - incoming/outgoing status-update schemas: `new_status` vs INCOMING_STATUSES / OUTGOING_STATUSES
+ *  - attachment schema: `correspondence_type` lowercase casing (pins Task 3.1) + `file_type`
+ *    vs the ALLOWED_MIME_TYPES allowlist
  *
- * **Validates: Requirements 9.1, 9.2, 9.3**
+ * Preservation (3.1): valid enum values are still accepted across every enum field.
+ *
+ * **Validates: Requirements 2.7, 3.1**
  */
 
-// Route-level schemas (reconstructed exactly as in src/routes/correspondence.ts)
-// These use the same shared constants imported from @alsaqi/shared
-const routeIncomingSchema = z.object({
-  letter_number: z.string().min(1).max(100),
-  sender_entity: z.string().min(1).max(255),
-  sender_entity_type: z.enum(ENTITY_TYPES).optional(),
-  subject: z.string().min(1).max(500),
-  letter_date: z.string().min(1),
-  receipt_date: z.string().min(1),
-  classification: z.enum(CLASSIFICATIONS).optional(),
-  priority: z.enum(PRIORITIES).optional(),
-  method: z.enum(METHODS).optional(),
-  receiving_dept_id: z.string().uuid().optional().nullable(),
-  assigned_dept_id: z.string().uuid().optional().nullable(),
-  assigned_user_id: z.string().uuid().optional().nullable(),
-  follow_up_required: z.boolean().optional(),
-  follow_up_date: z.string().optional().nullable(),
-  response_required: z.boolean().optional(),
-  response_due_date: z.string().optional().nullable(),
-  notes: z.string().optional().nullable(),
-});
+// Keep the import of `../correspondence` side-effect-free. That module transitively pulls in
+// CorrespondenceService (-> db/index, winston logger, n8n) and AuthService (-> db, key/audit
+// chain services). This test only inspects the exported Zod schemas and never builds the router
+// (createCorrespondenceRoutes), so both services are stubbed with empty objects (mirrors
+// correspondence.integration.test.ts). The module loads, the exported schemas are the REAL ones,
+// and no DB connection or logger transport is opened.
+vi.mock('../../services/CorrespondenceService', () => ({ CorrespondenceService: {} }));
+vi.mock('../../services/AuthService', () => ({ AuthService: {} }));
 
-const routeOutgoingSchema = z.object({
-  letter_date: z.string().min(1),
-  recipient_entity: z.string().min(1).max(255),
-  subject: z.string().min(1).max(500),
-  classification: z.enum(CLASSIFICATIONS).optional(),
-  sending_method: z.enum(METHODS).optional(),
-  attachment_file: z.string().optional().nullable(),
-});
+// The REAL route schemas, imported (not reconstructed) — this is the crux of finding 1.7.
+// Aliased to the historical route* names to minimize churn in the existing assertions below.
+import {
+  incomingSchema as routeIncomingSchema,
+  outgoingSchema as routeOutgoingSchema,
+  linkSchema as routeLinkSchema,
+  incomingStatusUpdateSchema,
+  outgoingStatusUpdateSchema,
+} from '../correspondence';
 
-const routeLinkSchema = z.object({
-  incoming_id: z.string().uuid(),
-  outgoing_id: z.string().uuid(),
-  link_type: z.enum(LINK_TYPES).optional().default('Reply'),
-});
+// The attachment schema + MIME allowlist are backend-only (there is no shared attachment
+// validator), so they are imported directly from the schema module that owns them.
+import { correspondenceAttachmentSchema, ALLOWED_MIME_TYPES } from '../../schemas/correspondence';
 
 /**
  * Extract enum options from a Zod v4 schema field by traversing
@@ -133,6 +126,14 @@ const validOutgoingBase = {
 const validLinkBase = {
   incoming_id: '550e8400-e29b-41d4-a716-446655440000',
   outgoing_id: '660e8400-e29b-41d4-a716-446655440000',
+};
+
+const validAttachmentBase = {
+  correspondence_id: '550e8400-e29b-41d4-a716-446655440000',
+  correspondence_type: 'incoming',
+  file_name: 'document.pdf',
+  file_type: 'application/pdf',
+  file_data: 'base64-encoded-content',
 };
 
 describe('Property 5: Shared validator and route schema synchronization', () => {
@@ -303,5 +304,102 @@ describe('Property 5: Shared validator and route schema synchronization', () => 
         );
       });
     }
+  });
+
+  // ── Status-update schemas (finding 1.7 extension) ───────────────────────────────
+  // No typed status-update validator is exported from @alsaqi/shared (only the
+  // deprecated string-based CorrespondenceStatusUpdateSchema), so the single-source-of-truth
+  // check asserts the route schema's `new_status` enum set equals the shared CONSTANT arrays.
+  describe('Status-update schema new_status is synchronized with the shared status constants', () => {
+    const statusSchemas = [
+      { name: 'incoming', schema: incomingStatusUpdateSchema, constants: INCOMING_STATUSES },
+      { name: 'outgoing', schema: outgoingStatusUpdateSchema, constants: OUTGOING_STATUSES },
+    ] as const;
+
+    for (const { name, schema, constants } of statusSchemas) {
+      it(`${name}: new_status enum set is exactly the shared status constant`, () => {
+        const routeValues = getEnumOptions(schema, 'new_status');
+        expect(routeValues).not.toBeNull();
+        expect([...routeValues!].sort()).toEqual([...constants].sort());
+      });
+
+      it(`${name}: every shared status value is accepted (property)`, () => {
+        fc.assert(
+          fc.property(
+            fc.constantFrom(...constants),
+            (validStatus) => {
+              expect(isFieldAccepted(schema, 'new_status', validStatus, {})).toBe(true);
+            }
+          ),
+          { numRuns: 100 }
+        );
+      });
+
+      it(`${name}: values outside the shared status set are rejected (property)`, () => {
+        fc.assert(
+          fc.property(
+            fc.string({ minLength: 1, maxLength: 50 }).filter(
+              (s) => !(constants as readonly string[]).includes(s)
+            ),
+            (invalidStatus) => {
+              expect(isFieldAccepted(schema, 'new_status', invalidStatus, {})).toBe(false);
+            }
+          ),
+          { numRuns: 100 }
+        );
+      });
+    }
+  });
+
+  // ── Attachment schema (finding 1.7 extension, pins Task 3.1) ─────────────────────
+  // correspondence_type is lowercase at the HTTP edge (matches the lowercase path params);
+  // file_type must be one of the ALLOWED_MIME_TYPES allowlist.
+  describe('Attachment schema casing and MIME allowlist are synchronized', () => {
+    it('correspondence_type enum set is exactly the lowercase { incoming, outgoing }', () => {
+      const values = getEnumOptions(correspondenceAttachmentSchema, 'correspondence_type');
+      expect(values).not.toBeNull();
+      expect([...values!].sort()).toEqual(['incoming', 'outgoing'].sort());
+    });
+
+    it('correspondence_type accepts lowercase incoming/outgoing and rejects the capitalized form (Task 3.1 casing)', () => {
+      // Lowercase accepted
+      expect(isFieldAccepted(correspondenceAttachmentSchema, 'correspondence_type', 'incoming', validAttachmentBase)).toBe(true);
+      expect(isFieldAccepted(correspondenceAttachmentSchema, 'correspondence_type', 'outgoing', validAttachmentBase)).toBe(true);
+      // Capitalized (the pre-fix contract) rejected — this pins the casing decision
+      expect(isFieldAccepted(correspondenceAttachmentSchema, 'correspondence_type', 'Incoming', validAttachmentBase)).toBe(false);
+      expect(isFieldAccepted(correspondenceAttachmentSchema, 'correspondence_type', 'Outgoing', validAttachmentBase)).toBe(false);
+    });
+
+    it('file_type enum set is exactly the ALLOWED_MIME_TYPES allowlist', () => {
+      const values = getEnumOptions(correspondenceAttachmentSchema, 'file_type');
+      expect(values).not.toBeNull();
+      expect([...values!].sort()).toEqual([...ALLOWED_MIME_TYPES].sort());
+    });
+
+    it('file_type: every allowed MIME type is accepted (property)', () => {
+      fc.assert(
+        fc.property(
+          fc.constantFrom(...ALLOWED_MIME_TYPES),
+          (mime) => {
+            expect(isFieldAccepted(correspondenceAttachmentSchema, 'file_type', mime, validAttachmentBase)).toBe(true);
+          }
+        ),
+        { numRuns: 50 }
+      );
+    });
+
+    it('file_type: values outside the allowlist are rejected (property)', () => {
+      fc.assert(
+        fc.property(
+          fc.string({ minLength: 1, maxLength: 50 }).filter(
+            (s) => !(ALLOWED_MIME_TYPES as readonly string[]).includes(s)
+          ),
+          (badMime) => {
+            expect(isFieldAccepted(correspondenceAttachmentSchema, 'file_type', badMime, validAttachmentBase)).toBe(false);
+          }
+        ),
+        { numRuns: 100 }
+      );
+    });
   });
 });

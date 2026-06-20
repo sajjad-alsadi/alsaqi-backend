@@ -60,6 +60,15 @@ export class AuthService {
 
       if (user.locked_until && new Date(user.locked_until) > new Date()) {
         console.warn(`[AuthService] Login failed: Account locked for "${user.username}"`);
+        // Sliding-window lockout (Req 2.6): a wrong-password attempt arriving DURING an active
+        // lock must still be recorded so handleFailedLogin can advance `locked_until`. Defer the
+        // side-effect to AFTER this (rolled-back) transaction exactly like the normal failed-login
+        // path below. Only a wrong password slides the window — a correct password during a lock
+        // must NOT extend it. The client-visible response is unchanged: a locked account never
+        // logs in and always receives the single generic failure (Req 15.2, 15.3).
+        if (!passwordMatches) {
+          pendingFailedLogin = { user };
+        }
         throw new InvalidCredentialsError();
       }
 
@@ -238,15 +247,27 @@ export class AuthService {
     if (authoritativeCount >= lockThreshold) {
       // Commit the lockout state first and independently, so it is preserved even if the
       // subsequent notification transaction fails and rolls back (Req 8.5).
-      // Use a conditional UPDATE so that concurrent attempts don't both trigger notifications:
-      // only the request that actually transitions the user into locked state will notify admins.
+      // Compute the new expiry ONCE and reuse it for both statements below.
+      const newLockUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      // Conditional UPDATE = unlocked->locked transition detector / notification dedup: only the
+      // request that actually flips the account into the locked state gets a row back, so admins
+      // are notified exactly once per transition (preserves Req 3.8).
       const lockResult = await db.prepare(
         "UPDATE users SET locked_until = ?::timestamp WHERE id = ?::uuid AND (locked_until IS NULL OR locked_until < CURRENT_TIMESTAMP) RETURNING id"
-      ).get(new Date(Date.now() + 15 * 60 * 1000).toISOString(), user.id);
+      ).get(newLockUntil, user.id);
 
-      // Only notify if this request actually performed the lockout transition
       if (lockResult) {
-        await AuthService.notifyAdminsOfLockout(user, ipAddress);
+        // This request performed the transition: notify admins once, reporting the authoritative
+        // post-increment attempt count (Req 2.6).
+        await AuthService.notifyAdminsOfLockout(user, ipAddress, authoritativeCount);
+      } else {
+        // The account is already locked: SLIDE the window forward without re-notifying, so each
+        // failed attempt during an active lock extends `locked_until` (sliding window, Req 2.6)
+        // while the once-per-transition notification dedup is preserved (Req 3.8).
+        await db.prepare(
+          "UPDATE users SET locked_until = ?::timestamp WHERE id = ?::uuid"
+        ).run(newLockUntil, user.id);
       }
     }
   }
@@ -260,10 +281,13 @@ export class AuthService {
    * the lockout event is recorded (Req 8.5). When no active administrator exists, zero rows are
    * persisted and the operation completes without raising an error (Req 8.4).
    */
-  private static async notifyAdminsOfLockout(user: any, ipAddress?: string): Promise<void> {
+  private static async notifyAdminsOfLockout(user: any, ipAddress?: string, authoritativeCount?: number): Promise<void> {
     try {
       await db.transaction(async () => {
-        const description = `Account "${user.username}" locked after ${user.failed_attempts + 1} failed login attempts (IP: ${ipAddress || 'Unknown'})`;
+        // Report the authoritative post-increment attempt count (Req 2.6). Fall back to the
+        // pre-increment in-memory snapshot only when a count was not supplied by the caller.
+        const attemptCount = authoritativeCount ?? (user.failed_attempts + 1);
+        const description = `Account "${user.username}" locked after ${attemptCount} failed login attempts (IP: ${ipAddress || 'Unknown'})`;
         await db.prepare(`
           INSERT INTO notifications (user_id, event_type, description, related_module, link, status, actor_id, entity_type)
           SELECT id, 'account_locked'::text, ?::text, 'Security'::text, '/users'::text, 'Unread', ?::uuid, 'user'

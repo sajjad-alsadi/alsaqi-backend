@@ -23,7 +23,7 @@ const typeIdParamSchema = z.object({
   ),
 });
 
-const incomingSchema = z.object({
+export const incomingSchema = z.object({
   letter_number: z.string().min(1).max(100),
   sender_entity: z.string().min(1).max(255),
   sender_entity_type: z.enum(ENTITY_TYPES).optional(),
@@ -43,7 +43,7 @@ const incomingSchema = z.object({
   notes: z.string().optional().nullable()
 });
 
-const outgoingSchema = z.object({
+export const outgoingSchema = z.object({
   letter_date: z.string().min(1),
   recipient_entity: z.string().min(1).max(255),
   subject: z.string().min(1).max(500),
@@ -59,20 +59,36 @@ const referSchema = z.object({
   notes: z.string().optional().nullable()
 });
 
-const linkSchema = z.object({
+export const linkSchema = z.object({
   incoming_id: z.string().uuid(),
   outgoing_id: z.string().uuid(),
   link_type: z.enum(LINK_TYPES).optional().default('Reply')
 });
 
-const incomingStatusUpdateSchema = z.object({
+export const incomingStatusUpdateSchema = z.object({
   new_status: z.enum(INCOMING_STATUSES),
   notes: z.string().optional().nullable(),
 });
 
-const outgoingStatusUpdateSchema = z.object({
+export const outgoingStatusUpdateSchema = z.object({
   new_status: z.enum(OUTGOING_STATUSES),
   notes: z.string().optional().nullable(),
+});
+
+// Archive list query schema (finding 1.2 -> 2.2): validate/normalize the optional
+// `type` filter against the same lowercase set as the path params, so an unknown
+// `type` (e.g. the capitalized `Incoming`) is a deterministic 400 and a valid one
+// filters correctly — no silent fall-through to the combined incoming+outgoing set.
+// `search`/`page`/`pageSize` are declared so they survive validation (Zod strips
+// unknown keys by default). Pagination is intentionally kept permissive here:
+// coerced optional numbers with NO upper-bound clamp and NO default. The GET /archive
+// handler then routes `req.query` through parsePaginationParams (the shared clamp), so the
+// upper-bound cap (pageSize <= MAX_PAGE_SIZE) is applied on top of this schema (finding 1.5).
+const archiveQuerySchema = z.object({
+  type: z.enum(['incoming', 'outgoing'], { message: 'type must be "incoming" or "outgoing"' }).optional(),
+  search: z.string().optional(),
+  page: z.coerce.number().int({ message: 'page must be an integer' }).min(1, { message: 'page must be at least 1' }).optional(),
+  pageSize: z.coerce.number().int({ message: 'pageSize must be an integer' }).min(1, { message: 'pageSize must be at least 1' }).optional(),
 });
 
 export const createCorrespondenceRoutes = (
@@ -177,8 +193,14 @@ export const createCorrespondenceRoutes = (
   }));
 
   // 6.1 Archive List (Unified & Paginated)
-  router.get("/archive", authenticate, asyncHandler(async (req, res) => {
-    const result = await CorrespondenceService.getArchive(req.query);
+  router.get("/archive", authenticate, validateQuery(archiveQuerySchema), asyncHandler(async (req, res) => {
+    // Finding 1.5 -> 2.5: apply the shared pagination clamp, like the other list routes.
+    // archiveQuerySchema (Task 3.2) has already validated `type` and coerced optional
+    // `page`/`pageSize`; parsePaginationParams adds the upper-bound clamp (pageSize <=
+    // MAX_PAGE_SIZE) so a huge `?pageSize` can never become an unbounded SQL LIMIT. Pass the
+    // clamped NUMERIC page/pageSize to the service while preserving the validated type/search.
+    const { page, pageSize } = parsePaginationParams(req.query as Record<string, any>);
+    const result = await CorrespondenceService.getArchive({ ...req.query, page, pageSize });
     res.json(result);
   }));
 
@@ -190,7 +212,7 @@ export const createCorrespondenceRoutes = (
     res.json(data);
   }));
 
-  router.post("/attachments", authenticate, checkPermission('Correspondence', 'Edit'), validateBody(correspondenceAttachmentSchema.passthrough()), asyncHandler(async (req, res) => {
+  router.post("/attachments", authenticate, checkPermission('Correspondence', 'Edit'), validateBody(correspondenceAttachmentSchema), asyncHandler(async (req, res) => {
     const userId = (req as any).user.id;
     await CorrespondenceService.addAttachment(req.body, userId);
     
