@@ -10,6 +10,7 @@ import {
   classifyDatabaseUrl,
   isEmbeddedDbAllowed,
   parsePoolConfig,
+  resolvePoolRuntimeConfig,
   type DbUrlClassification,
   type PoolConfigError,
 } from "./poolConfig.js";
@@ -212,17 +213,56 @@ if (dbUrlClassification.kind === "valid-external") {
       };
     }
 
-    client = new pg.Pool({
+    // In production, use the resolved, clamped runtime configuration (Req 7.1,
+    // 7.4, 7.5): clamp DB_POOL_MAX into [1..API_DB_CONN_CAP] and bound pool
+    // acquisition by acquisitionTimeoutMillis. Outside production, keep the
+    // validated parsePoolConfig values.
+    const isProduction = process.env.NODE_ENV === "production";
+    const runtimeCfg = isProduction
+      ? resolvePoolRuntimeConfig(process.env)
+      : null;
+
+    const pool = new pg.Pool({
       connectionString: normalizedUrl,
       ssl: sslOption,
-      connectionTimeoutMillis: poolResult.config.connectionTimeoutMillis,
-      max: poolResult.config.max,
+      connectionTimeoutMillis: runtimeCfg
+        ? runtimeCfg.acquisitionTimeoutMillis
+        : poolResult.config.connectionTimeoutMillis,
+      max: runtimeCfg ? runtimeCfg.max : poolResult.config.max,
       idleTimeoutMillis: 30000,
     });
+    client = pool;
     isExternal = true;
 
+    // In production, apply statement_timeout to every newly created connection
+    // (Req 7.1, 7.2). SET does not accept bind parameters, so the value is
+    // interpolated directly — it is a clamped integer produced by
+    // resolvePoolRuntimeConfig, so this is safe from injection. A statement that
+    // exceeds the timeout is cancelled and surfaced as an error to the caller;
+    // transaction() releases the connection in finally so the pool stays healthy
+    // (Req 7.3).
+    if (runtimeCfg) {
+      // Postgres `statement_timeout` requires an INTEGER number of milliseconds;
+      // a fractional value (e.g. from DB_STATEMENT_TIMEOUT_MS=30000.5) makes the
+      // SET statement error out — which, being caught/logged below, would leave
+      // the connection with NO statement timeout (fail-open). Floor to a safe
+      // integer. The value is still a clamped, finite number from
+      // resolvePoolRuntimeConfig, so this is not an injection vector.
+      const statementTimeoutMs = Math.floor(runtimeCfg.statementTimeoutMs);
+      pool.on("connect", (c) => {
+        void c
+          .query(`SET statement_timeout TO ${statementTimeoutMs}`)
+          .catch((err: unknown) => {
+            console.error(
+              "[DB Pool] Failed to apply statement_timeout on connect:",
+              (err as { message?: string })?.message ?? err
+            );
+          });
+      });
+    }
+
     // Handle idle client errors to prevent unhandled events from crashing the process (Req 2.5).
-    (client as pg.Pool).on('error', (err) => {
+    pool.on('error', (err) => {
       console.error('[DB Pool] Idle client error:', err.message || err);
     });
   }

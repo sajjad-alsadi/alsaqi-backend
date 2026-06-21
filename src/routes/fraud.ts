@@ -22,7 +22,7 @@ const fraudRejectSchema = z.object({
 export const createFraudRoutes = (db: any, authenticate: any, checkPermission: any, logError: any, createNotification: any) => {
   const router = Router();
 
-  router.post("/", authenticate, asyncHandler(async (req, res) => {
+  router.post("/", authenticate, checkPermission('IntegrityManagement', 'Create'), asyncHandler(async (req, res) => {
     const typedReq = req as unknown as AuthenticatedRequest;
     const validation = fraudRequestSchema.safeParse(typedReq.body);
     if (!validation.success) {

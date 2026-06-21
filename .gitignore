@@ -1,5 +1,6 @@
 ﻿node_modules/
 dist/
+coverage/
 uploads/
 tmp/
 data/keys/
@@ -8,3 +9,11 @@ data/keys/
 !.env.production.example
 *.log
 logs/
+
+# TLS certificate material for the reverse-proxy (never commit private keys).
+# Test/staging self-signed certs live here (see docker-compose.test.yml).
+reverse-proxy/certs/
+!reverse-proxy/certs/README.md
+
+# Auto-generated tracked fix-items log (scripts/smoke-https.sh)
+docs/launch-fix-items.md

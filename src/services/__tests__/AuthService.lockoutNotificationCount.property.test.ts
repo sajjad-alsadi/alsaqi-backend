@@ -39,6 +39,12 @@ vi.mock('../../db/index', () => {
           if (sql.includes('user_management_settings')) {
             return { failed_login_threshold: state.threshold };
           }
+          // Conditional unlocked->locked transition UPDATE (`... RETURNING id`): in a real DB this
+          // returns a row for the request that flips the account into the locked state, which is
+          // what drives the single admin-notification pass. Model that row here.
+          if (sql.includes('SET locked_until') && sql.includes('RETURNING id')) {
+            return { id: (state.userRow as { id: string }).id };
+          }
           return undefined;
         },
         all: async (..._args: unknown[]) => {
@@ -49,7 +55,12 @@ vi.mock('../../db/index', () => {
           return [];
         },
         run: async (..._args: unknown[]) => {
-          if (sql.includes('INSERT INTO notifications')) counter.notifications++;
+          if (sql.includes('INSERT INTO notifications')) {
+            // The production code uses a single set-based `INSERT INTO notifications ... SELECT id
+            // FROM users WHERE role = ? AND status = 'Active'`, which inserts exactly one row per
+            // active admin. Model that row count (the SQL-level `status = 'Active'` filter).
+            counter.notifications += state.admins.filter((a) => a.status === 'Active').length;
+          }
           return {};
         },
       };

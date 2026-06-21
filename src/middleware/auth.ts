@@ -13,6 +13,30 @@ import { AuthCacheInvalidator } from '../services/AuthCacheInvalidator';
 import { isLoginBlockedStatus } from '../services/accountStatus';
 import logger from '../utils/logger.js';
 import { getAuthRateLimitMax, getAuthRateLimitWindowS } from '../config/environmentConfig.js';
+import { ROUTE_PERMISSION_METADATA_KEY } from '../security/routeInventory.js';
+
+/**
+ * Attach permission metadata ({ module, action }) to a checkPermission middleware
+ * so the route↔permission inventory (src/security/routeInventory.ts) can extract
+ * the enforced module/action pair from the Express middleware stack (Req 6.4).
+ *
+ * The factory closes over module/action but the values are otherwise invisible
+ * from the outside; tagging the returned function exposes them for introspection
+ * without affecting middleware behavior.
+ */
+const tagPermissionMiddleware = <T extends (...args: any[]) => any>(
+  middleware: T,
+  module: string,
+  action: string,
+): T => {
+  Object.defineProperty(middleware, ROUTE_PERMISSION_METADATA_KEY, {
+    value: { module, action },
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+  return middleware;
+};
 
 /**
  * Routes a user must still reach while `requires_password_change` is true so they
@@ -279,15 +303,19 @@ export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PU
         );
       }
       // In production, return a middleware that always responds with 500
-      return (req: AuthenticatedRequest, res: Response, _next: NextFunction) => {
+      const unregistered = (req: AuthenticatedRequest, res: Response, _next: NextFunction) => {
         logger.error(`checkPermission: Unregistered module '${module}' used in route middleware.`);
         return res.status(500).json({
           error: 'Internal authorization configuration error',
         });
       };
+      // Tag with permission metadata so the route↔permission inventory can extract
+      // the module/action pair from the middleware stack (Req 6.4, see
+      // src/security/routeInventory.ts).
+      return tagPermissionMiddleware(unregistered, module, action);
     }
 
-    return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const permissionMiddleware = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
       // Req 3.6, 3.8: Ensure authenticate() has populated req.user
       if (!req.user) {
         return res.status(401).json({
@@ -325,6 +353,11 @@ export const createAuthMiddlewares = (db: IDBWrapper, JWT_SECRET: string, JWT_PU
         });
       }
     };
+
+    // Tag with permission metadata so the route↔permission inventory can extract
+    // the module/action pair from the middleware stack (Req 6.4, see
+    // src/security/routeInventory.ts).
+    return tagPermissionMiddleware(permissionMiddleware, module, action);
   };
 
   /**

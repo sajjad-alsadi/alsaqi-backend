@@ -137,9 +137,33 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
 
   // ─── Middleware Stack ─────────────────────────────────────────────────────────
 
-  // 0. Trust proxy - required for correct X-Forwarded-For IP extraction behind Load Balancer
-  //    Requirement 8.1: Extract real client IP from X-Forwarded-For
+  // 0. Trust proxy (single proxy hop) - required when running behind the
+  //    TLS-terminating Reverse_Proxy. With value 1, Express trusts a single hop
+  //    of X-Forwarded-* headers, so a request the proxy forwards with
+  //    X-Forwarded-Proto=https is treated as secure: req.protocol resolves to
+  //    'https', absolute URLs are built with the https scheme, and the
+  //    Secure-cookie logic applies. Also yields correct X-Forwarded-For client
+  //    IP extraction.
+  //    Requirements: 4.6 (HTTPS-forwarded requests treated as secure), 8.1
   app.set('trust proxy', 1);
+
+  // 0a. Deployed-system Version_Header (X-API-Version) on EVERY API response.
+  //     Registered as early as possible — BEFORE compression, body parsing,
+  //     body-size limit, and file-upload middleware — so the header is present
+  //     even on early-rejection responses (e.g. a 413 from bodySizeLimit or the
+  //     file-upload abortOnLimit) that never reach the later version middleware.
+  //     This guarantees that every /api response identifies the deployed system
+  //     version. The value is sourced from the API_VERSION env override when set,
+  //     otherwise the @alsaqi/shared API_VERSION constant (which tracks the
+  //     package.json version of the deployed system).
+  //     Requirements: 11.7
+  const deployedApiVersion = process.env.API_VERSION?.trim() || API_VERSION;
+  app.use((req, res, next) => {
+    if (req.path === '/api' || req.path.startsWith('/api/')) {
+      res.setHeader('X-API-Version', deployedApiVersion);
+    }
+    next();
+  });
 
   // 1. Compression (before other middleware for optimal compression)
   app.use(createCompressionMiddleware());
@@ -447,8 +471,19 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
             }
             return res.status(401).json({ error: 'Unauthorized' });
           }
-          const ip = req.ip || req.socket.remoteAddress || '';
-          if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') {
+          // No token configured. The loopback allowance MUST use the real TCP
+          // peer address (req.socket.remoteAddress), NOT req.ip: with
+          // `trust proxy` enabled, req.ip is derived from X-Forwarded-For and can
+          // be spoofed (`X-Forwarded-For: 127.0.0.1`) to bypass this gate
+          // (fail-open). In production, refuse entirely without a token so the
+          // endpoint is never exposed on the proxied/public path.
+          if (config.nodeEnv === 'production') {
+            return res.status(403).json({
+              error: 'Forbidden: set METRICS_TOKEN to scrape /metrics in production',
+            });
+          }
+          const peer = req.socket.remoteAddress || '';
+          if (peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1') {
             return next();
           }
           return res.status(403).json({ error: 'Forbidden' });

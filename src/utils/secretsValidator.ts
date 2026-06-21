@@ -1,106 +1,162 @@
 import logger from './logger';
 
 /**
- * Result of production secrets validation.
- * Contains validation status, errors (blocking), and warnings (non-blocking).
+ * Reason a production-critical secret failed validation.
+ * - `missing`     : the variable is unset or empty.
+ * - `weak-default`: the variable matches a known weak/example default value.
+ * - `too-short`   : the variable is shorter than the minimum required length.
  */
-export interface SecretValidationResult {
-  isValid: boolean;
-  errors: string[];
-  warnings: string[];
+export type SecretFailureReason = 'weak-default' | 'too-short' | 'missing';
+
+/** A single failed secret with the variable name and the reason it failed. */
+export interface SecretFailure {
+  variable: string;
+  reason: SecretFailureReason;
 }
 
-/** Known weak default values that must be rejected in production */
-const WEAK_DEFAULTS: Record<string, string[]> = {
+/**
+ * Result of production secrets validation.
+ * `isValid` is true if and only if `failures` is empty.
+ */
+export interface SecretsValidationResult {
+  isValid: boolean;
+  failures: SecretFailure[];
+}
+
+/** Known weak default values that must be rejected in production. */
+const WEAK_DEFAULTS: Record<string, readonly string[]> = {
   JWT_SECRET: ['alsaqi-dev-secret-key-123'],
   VITE_STORAGE_SECRET: ['your-32-character-secret-key-here'],
   VITE_NETWORK_SECRET: ['your-network-hmac-secret-here'],
 };
 
 /**
- * Validates that all production-critical secrets meet minimum security requirements.
+ * Strength rules for the three production-critical secrets, matching the rules
+ * already enforced by Audit_Spec (`production-readiness-audit`):
+ * - JWT_SECRET         : not a weak default, minimum 64 characters.
+ * - VITE_STORAGE_SECRET: not a weak default, minimum 32 characters.
+ * - VITE_NETWORK_SECRET: not a weak default (no minimum length in Audit_Spec).
  *
- * Checks:
- * - JWT_SECRET: not a weak default, minimum 64 characters
- * - VITE_STORAGE_SECRET: set, not a weak default, minimum 32 characters
- * - VITE_NETWORK_SECRET: set, not a weak default
- * - DATABASE_URL: set
+ * `minLength: 0` means no minimum-length rule applies.
+ */
+const SECRET_RULES: ReadonlyArray<{ variable: string; minLength: number }> = [
+  { variable: 'JWT_SECRET', minLength: 64 },
+  { variable: 'VITE_STORAGE_SECRET', minLength: 32 },
+  { variable: 'VITE_NETWORK_SECRET', minLength: 0 },
+];
+
+/**
+ * Evaluates a single secret against the weak-default and minimum-length rules.
+ * Returns a `SecretFailure` describing the first failing rule, or `null` if the
+ * secret passes. The order of precedence is: missing → weak-default → too-short.
+ */
+function evaluateSecret(
+  variable: string,
+  value: string | undefined,
+  minLength: number
+): SecretFailure | null {
+  if (value === undefined || value.length === 0) {
+    return { variable, reason: 'missing' };
+  }
+  if ((WEAK_DEFAULTS[variable] ?? []).includes(value)) {
+    return { variable, reason: 'weak-default' };
+  }
+  if (minLength > 0 && value.length < minLength) {
+    return { variable, reason: 'too-short' };
+  }
+  return null;
+}
+
+/**
+ * PURE validator: evaluates `JWT_SECRET`, `VITE_STORAGE_SECRET`, and
+ * `VITE_NETWORK_SECRET` against the Audit_Spec strength rules (rejecting weak
+ * defaults and enforcing minimum lengths).
  *
- * Warnings (non-blocking):
- * - CORS_ORIGIN not set
- * - FILE_ENCRYPTION_KEY not set
+ * `isValid` is `true` if and only if all three secrets pass their rules.
  *
- * IMPORTANT: Never logs actual secret values.
+ * This function has NO side effects: it never logs, never reads `process.env`
+ * implicitly beyond the supplied default, and never terminates the process.
+ * Effects (logging, process termination) live in {@link runSecretsValidation}.
  */
 export function validateProductionSecrets(
   env: Record<string, string | undefined> = process.env
-): SecretValidationResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
+): SecretsValidationResult {
+  const failures: SecretFailure[] = [];
 
-  // JWT_SECRET validation
-  if (!env.JWT_SECRET || WEAK_DEFAULTS.JWT_SECRET.includes(env.JWT_SECRET)) {
-    errors.push('JWT_SECRET must be set to a strong random value (not a default)');
-  } else if (env.JWT_SECRET.length < 64) {
-    errors.push('JWT_SECRET must be at least 64 characters');
-  }
-
-  // VITE_STORAGE_SECRET validation
-  if (!env.VITE_STORAGE_SECRET || WEAK_DEFAULTS.VITE_STORAGE_SECRET.includes(env.VITE_STORAGE_SECRET)) {
-    errors.push('VITE_STORAGE_SECRET must be set to a strong random value (not a default)');
-  } else if (env.VITE_STORAGE_SECRET.length < 32) {
-    errors.push('VITE_STORAGE_SECRET must be at least 32 characters');
-  }
-
-  // VITE_NETWORK_SECRET validation
-  if (!env.VITE_NETWORK_SECRET || WEAK_DEFAULTS.VITE_NETWORK_SECRET.includes(env.VITE_NETWORK_SECRET)) {
-    errors.push('VITE_NETWORK_SECRET must be set to a strong random value (not a default)');
-  }
-
-  // DATABASE_URL validation
-  if (!env.DATABASE_URL) {
-    errors.push('DATABASE_URL must be set in production');
-  }
-
-  // Optional but recommended variables (warnings only)
-  if (!env.CORS_ORIGIN) {
-    warnings.push('CORS_ORIGIN not set - CORS will be disabled');
-  }
-  if (!env.FILE_ENCRYPTION_KEY) {
-    warnings.push('FILE_ENCRYPTION_KEY not set - file encryption disabled');
+  for (const rule of SECRET_RULES) {
+    const failure = evaluateSecret(rule.variable, env[rule.variable], rule.minLength);
+    if (failure) {
+      failures.push(failure);
+    }
   }
 
   return {
-    isValid: errors.length === 0,
-    errors,
-    warnings,
+    isValid: failures.length === 0,
+    failures,
   };
 }
 
 /**
- * Runs secrets validation and logs results appropriately.
- * In production: logs errors and returns the result (caller should exit on failure).
- * In development: logs warnings but never blocks startup.
+ * Builds a human-readable, secret-safe message for a failure. The actual secret
+ * value is NEVER included — only the variable name and the failure reason.
+ */
+function describeFailure(failure: SecretFailure): string {
+  switch (failure.reason) {
+    case 'missing':
+      return `${failure.variable} must be set to a strong random value`;
+    case 'weak-default':
+      return `${failure.variable} must not use a known weak/default value`;
+    case 'too-short':
+      return `${failure.variable} does not meet the minimum required length`;
+    default:
+      return `${failure.variable} failed secrets validation`;
+  }
+}
+
+/** Options controlling the effectful wrapper {@link runSecretsValidation}. */
+export interface RunSecretsValidationOptions {
+  /**
+   * Whether the process is running in production. When omitted, it is derived
+   * from `env.NODE_ENV === 'production'`.
+   */
+  isProduction?: boolean;
+  /**
+   * Process-termination hook, injectable for testing. Defaults to
+   * `process.exit`. Invoked with code `1` in production when validation fails.
+   */
+  exit?: (code: number) => never;
+}
+
+/**
+ * EFFECTFUL wrapper around {@link validateProductionSecrets}.
+ *
+ * In production, when secrets validation fails, it logs a single FATAL message
+ * enumerating every failure (sanitized — secret values are never printed) and
+ * terminates the process with a non-zero exit code before the HTTP listener can
+ * accept connections.
+ *
+ * Outside production, failures are logged as non-blocking warnings and the
+ * process is not terminated.
+ *
+ * Always returns the underlying validation result.
  */
 export function runSecretsValidation(
-  env: Record<string, string | undefined> = process.env
-): SecretValidationResult {
+  env: Record<string, string | undefined> = process.env,
+  opts: RunSecretsValidationOptions = {}
+): SecretsValidationResult {
   const result = validateProductionSecrets(env);
-  const isProduction = env.NODE_ENV === 'production';
+  const isProduction = opts.isProduction ?? env.NODE_ENV === 'production';
+  const exit = opts.exit ?? ((code: number): never => process.exit(code));
 
-  if (isProduction) {
-    if (!result.isValid) {
+  if (!result.isValid) {
+    if (isProduction) {
       logger.error('FATAL: Production secrets validation failed:');
-      result.errors.forEach((e) => logger.error(`  ✗ ${e}`));
-    }
-    result.warnings.forEach((w) => logger.warn(`  ⚠ ${w}`));
-  } else {
-    // Development mode: log warnings for weak secrets but don't block
-    if (result.errors.length > 0) {
+      result.failures.forEach((f) => logger.error(`  ✗ ${describeFailure(f)}`));
+      exit(1);
+    } else {
       logger.warn('Development mode - weak secrets detected (would fail in production):');
-      result.errors.forEach((e) => logger.warn(`  ⚠ ${e}`));
+      result.failures.forEach((f) => logger.warn(`  ⚠ ${describeFailure(f)}`));
     }
-    result.warnings.forEach((w) => logger.debug(`  ℹ ${w}`));
   }
 
   return result;

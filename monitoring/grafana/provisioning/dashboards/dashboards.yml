@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning — production-launch-readiness (Requirement 13.2)
+# Auto-loads dashboards from the mounted dashboards directory on Grafana startup.
+apiVersion: 1
+
+providers:
+  - name: alsaqi-dashboards
+    orgId: 1
+    folder: ALSAQI
+    type: file
+    disableDeletion: false
+    # Re-scan the dashboards directory every 30s (<= 60s display latency, 13.2).
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

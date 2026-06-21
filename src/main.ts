@@ -7,12 +7,31 @@
 
 import 'dotenv/config';
 import type { WebSocketServer } from 'ws';
+import { parseStrictNodeEnv } from './config/nodeEnv.js';
+import type { NodeEnv } from './config/nodeEnv.js';
 import { validateEnvironmentOnStartup } from './config/envValidator.js';
+import { runSecretsValidation } from './utils/secretsValidator.js';
 import { waitForDependencies } from './startup/dependencyCheck.js';
 import { getShutdownDrainTimeoutMs } from './config/environmentConfig.js';
 import { createGracefulShutdown } from './server/gracefulShutdown.js';
 import { createApiServer } from './index.js';
 import type { ApiServerConfig } from './index.js';
+
+// ─── Strict NODE_ENV Validation (must be the FIRST startup step) ──────────────
+// The strict NODE_ENV gate runs before any other initialization. Its failure is
+// UNCONDITIONAL (fail-closed): because downstream gates such as production
+// strictness depend on a known, unambiguous environment mode, an unset/empty/
+// out-of-set NODE_ENV must abort startup before anything else runs — we cannot
+// trust that we are not in production (Design → Area أ, Requirement 1.3).
+const parsedNodeEnv = parseStrictNodeEnv(process.env.NODE_ENV);
+if (!parsedNodeEnv.ok) {
+  console.error(
+    `[Startup] FATAL: NODE_ENV is invalid "${parsedNodeEnv.received}". ` +
+    `Allowed values: development | production | test. Exit(1).`
+  );
+  process.exit(1);
+}
+const nodeEnv: NodeEnv = parsedNodeEnv.value;
 
 // ─── Environment Validation (must run before any other initialization) ────────
 // Validates all required env vars, exits with FATAL in production if invalid.
@@ -22,6 +41,18 @@ if (!envValidation.isValid && process.env.NODE_ENV === 'production') {
   // to prevent any further initialization from running.
   // The exit is handled inside validateEnvironmentOnStartup with a guaranteed <5s exit.
   await new Promise(() => {}); // Block forever; process.exit() will terminate us
+}
+
+// ─── Production Secrets Strength Validation (Design → Area ب) ─────────────────
+// Runs after the NODE_ENV gate and the environment validation gate, and before
+// the HTTP listener starts. In production, weak/missing/too-short secrets
+// (JWT_SECRET, VITE_STORAGE_SECRET, VITE_NETWORK_SECRET) are FATAL: a single
+// FATAL message is logged and the process exits with code 1 before
+// createApiServer(...).start() can accept connections (Requirements 1.1, 1.2).
+const secrets = runSecretsValidation(process.env, { isProduction: nodeEnv === 'production' });
+if (!secrets.isValid && nodeEnv === 'production') {
+  console.error('[Startup] FATAL: فشل التحقق من قوة الأسرار الإنتاجية. Exit(1).');
+  process.exit(1); // قبل بدء المستمع
 }
 
 // ─── Environment Variable Parsing ────────────────────────────────────────────
@@ -36,13 +67,6 @@ function getRequiredEnv(name: string): string {
 
 function getOptionalEnv(name: string, defaultValue: string): string {
   return process.env[name] || defaultValue;
-}
-
-function parseNodeEnv(value: string): 'development' | 'production' | 'test' {
-  if (value === 'production' || value === 'test') {
-    return value;
-  }
-  return 'development';
 }
 
 function parseCorsOrigins(value: string): string[] {
@@ -63,7 +87,7 @@ function normalizeKey(raw: string | undefined): string {
 
 // ─── Build Config ────────────────────────────────────────────────────────────
 
-const nodeEnv = parseNodeEnv(getOptionalEnv('NODE_ENV', 'development'));
+// nodeEnv is resolved above via parseStrictNodeEnv (the first startup gate).
 
 // In development, allow fallback values for easier local setup
 const isDev = nodeEnv === 'development';

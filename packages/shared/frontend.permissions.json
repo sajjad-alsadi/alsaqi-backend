@@ -1,0 +1,318 @@
+[
+  {
+    "module": "Analytics",
+    "permission": "View"
+  },
+  {
+    "module": "AuditCharter",
+    "permission": "Create"
+  },
+  {
+    "module": "AuditCharter",
+    "permission": "Delete"
+  },
+  {
+    "module": "AuditCharter",
+    "permission": "Edit"
+  },
+  {
+    "module": "AuditCharter",
+    "permission": "View"
+  },
+  {
+    "module": "AuditEvidence",
+    "permission": "Create"
+  },
+  {
+    "module": "AuditEvidence",
+    "permission": "Delete"
+  },
+  {
+    "module": "AuditEvidence",
+    "permission": "Edit"
+  },
+  {
+    "module": "AuditEvidence",
+    "permission": "View"
+  },
+  {
+    "module": "AuditFindings",
+    "permission": "Approve"
+  },
+  {
+    "module": "AuditFindings",
+    "permission": "Create"
+  },
+  {
+    "module": "AuditFindings",
+    "permission": "Delete"
+  },
+  {
+    "module": "AuditFindings",
+    "permission": "Edit"
+  },
+  {
+    "module": "AuditFindings",
+    "permission": "View"
+  },
+  {
+    "module": "AuditPlans",
+    "permission": "Approve"
+  },
+  {
+    "module": "AuditPlans",
+    "permission": "Create"
+  },
+  {
+    "module": "AuditPlans",
+    "permission": "Delete"
+  },
+  {
+    "module": "AuditPlans",
+    "permission": "Edit"
+  },
+  {
+    "module": "AuditPlans",
+    "permission": "View"
+  },
+  {
+    "module": "AuditProgramLibrary",
+    "permission": "Create"
+  },
+  {
+    "module": "AuditProgramLibrary",
+    "permission": "Delete"
+  },
+  {
+    "module": "AuditProgramLibrary",
+    "permission": "Edit"
+  },
+  {
+    "module": "AuditProgramLibrary",
+    "permission": "View"
+  },
+  {
+    "module": "AuditTasks",
+    "permission": "Approve"
+  },
+  {
+    "module": "AuditTasks",
+    "permission": "Create"
+  },
+  {
+    "module": "AuditTasks",
+    "permission": "Delete"
+  },
+  {
+    "module": "AuditTasks",
+    "permission": "Edit"
+  },
+  {
+    "module": "AuditTasks",
+    "permission": "View"
+  },
+  {
+    "module": "ComplianceMatrix",
+    "permission": "Create"
+  },
+  {
+    "module": "ComplianceMatrix",
+    "permission": "Delete"
+  },
+  {
+    "module": "ComplianceMatrix",
+    "permission": "Edit"
+  },
+  {
+    "module": "ComplianceMatrix",
+    "permission": "View"
+  },
+  {
+    "module": "Correspondence",
+    "permission": "Create"
+  },
+  {
+    "module": "Correspondence",
+    "permission": "Delete"
+  },
+  {
+    "module": "Correspondence",
+    "permission": "Edit"
+  },
+  {
+    "module": "Correspondence",
+    "permission": "View"
+  },
+  {
+    "module": "Dashboard",
+    "permission": "View"
+  },
+  {
+    "module": "Departments",
+    "permission": "Create"
+  },
+  {
+    "module": "Departments",
+    "permission": "Delete"
+  },
+  {
+    "module": "Departments",
+    "permission": "Edit"
+  },
+  {
+    "module": "Departments",
+    "permission": "View"
+  },
+  {
+    "module": "IntegrityManagement",
+    "permission": "Approve"
+  },
+  {
+    "module": "IntegrityManagement",
+    "permission": "Create"
+  },
+  {
+    "module": "IntegrityManagement",
+    "permission": "Delete"
+  },
+  {
+    "module": "IntegrityManagement",
+    "permission": "Edit"
+  },
+  {
+    "module": "IntegrityManagement",
+    "permission": "View"
+  },
+  {
+    "module": "Notifications",
+    "permission": "View"
+  },
+  {
+    "module": "OrgStructure",
+    "permission": "Create"
+  },
+  {
+    "module": "OrgStructure",
+    "permission": "Delete"
+  },
+  {
+    "module": "OrgStructure",
+    "permission": "Edit"
+  },
+  {
+    "module": "OrgStructure",
+    "permission": "View"
+  },
+  {
+    "module": "Policies",
+    "permission": "Create"
+  },
+  {
+    "module": "Policies",
+    "permission": "Delete"
+  },
+  {
+    "module": "Policies",
+    "permission": "Edit"
+  },
+  {
+    "module": "Policies",
+    "permission": "View"
+  },
+  {
+    "module": "Recommendations",
+    "permission": "Approve"
+  },
+  {
+    "module": "Recommendations",
+    "permission": "Create"
+  },
+  {
+    "module": "Recommendations",
+    "permission": "Delete"
+  },
+  {
+    "module": "Recommendations",
+    "permission": "Edit"
+  },
+  {
+    "module": "Recommendations",
+    "permission": "View"
+  },
+  {
+    "module": "Reports",
+    "permission": "Approve"
+  },
+  {
+    "module": "Reports",
+    "permission": "Create"
+  },
+  {
+    "module": "Reports",
+    "permission": "Delete"
+  },
+  {
+    "module": "Reports",
+    "permission": "Edit"
+  },
+  {
+    "module": "Reports",
+    "permission": "View"
+  },
+  {
+    "module": "RiskRegister",
+    "permission": "Approve"
+  },
+  {
+    "module": "RiskRegister",
+    "permission": "Create"
+  },
+  {
+    "module": "RiskRegister",
+    "permission": "Delete"
+  },
+  {
+    "module": "RiskRegister",
+    "permission": "Edit"
+  },
+  {
+    "module": "RiskRegister",
+    "permission": "View"
+  },
+  {
+    "module": "Settings",
+    "permission": "Edit"
+  },
+  {
+    "module": "Settings",
+    "permission": "View"
+  },
+  {
+    "module": "SystemLogs",
+    "permission": "Delete"
+  },
+  {
+    "module": "SystemLogs",
+    "permission": "View"
+  },
+  {
+    "module": "UserManagement",
+    "permission": "Approve"
+  },
+  {
+    "module": "UserManagement",
+    "permission": "Create"
+  },
+  {
+    "module": "UserManagement",
+    "permission": "Delete"
+  },
+  {
+    "module": "UserManagement",
+    "permission": "Edit"
+  },
+  {
+    "module": "UserManagement",
+    "permission": "View"
+  }
+]

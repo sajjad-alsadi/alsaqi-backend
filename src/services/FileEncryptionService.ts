@@ -84,6 +84,17 @@ const STREAM_CHUNK_SIZE = 64 * 1024;
  */
 export class FileEncryptionService {
   private encryptionKey: Buffer | null = null;
+  /**
+   * المفتاح السابق المُستخدَم لفكّ التشفير فقط أثناء التدوير (rotation fallback).
+   *
+   * أثناء إعادة التشفير المتدرّجة، تبقى بعض العناصر مشفّرةً بالسرّ السابق حتى
+   * يُعاد تشفيرها. يُبقي هذا الحقل السرّ السابق صالحاً **لفكّ التشفير فقط** حتى
+   * يُتحقَّق من اكتمال إعادة التشفير، فلا تُفقَد قراءة أي عنصر (AC 19.3, 19.4).
+   * يُشتق من `FILE_ENCRYPTION_KEY_PREVIOUS` عند الإقلاع إن وُجد، أو يُضبط برمجياً
+   * عبر {@link setPreviousEncryptionKey}، ويُزال عبر {@link clearPreviousEncryptionKey}
+   * بعد التحقق من اكتمال الترحيل.
+   */
+  private previousEncryptionKey: Buffer | null = null;
   private uploadDir: string;
   private metadataStore: Map<string, EncryptionMetadata> = new Map();
 
@@ -95,6 +106,10 @@ export class FileEncryptionService {
   /**
    * Initializes the encryption key from FILE_ENCRYPTION_KEY using HKDF-SHA256.
    * If the key is not set, logs a warning and operates in passthrough mode.
+   *
+   * Also initializes the optional previous-key decryption fallback from
+   * FILE_ENCRYPTION_KEY_PREVIOUS, which keeps data readable during a scheduled
+   * secret rotation until re-encryption completion is verified (AC 19.3, 19.4).
    */
   private initializeKey(): void {
     const rawKey = process.env.FILE_ENCRYPTION_KEY;
@@ -108,6 +123,43 @@ export class FileEncryptionService {
     }
 
     this.encryptionKey = this.deriveKey(rawKey);
+
+    // Optional previous-key fallback for in-progress secret rotation. The previous
+    // secret stays valid for DECRYPTION ONLY (never used to encrypt new data) until
+    // re-encryption is verified complete (AC 19.3).
+    const rawPreviousKey = process.env.FILE_ENCRYPTION_KEY_PREVIOUS;
+    if (rawPreviousKey) {
+      this.previousEncryptionKey = this.deriveKey(rawPreviousKey);
+      logger.info(
+        '[FileEncryption] FILE_ENCRYPTION_KEY_PREVIOUS is set: previous key enabled for decryption fallback during rotation.'
+      );
+    }
+  }
+
+  /**
+   * Sets (or clears) the previous encryption key used as a decryption-only
+   * fallback during a key rotation. Pass the raw key material; pass `null` to
+   * clear. The previous key is NEVER used to encrypt new data — only to decrypt
+   * items not yet re-encrypted with the current key (AC 19.3, 19.4).
+   */
+  setPreviousEncryptionKey(rawKey: string | null): void {
+    this.previousEncryptionKey = rawKey ? this.deriveKey(rawKey) : null;
+  }
+
+  /**
+   * Clears the previous encryption key. Call this ONLY after
+   * {@link isReEncryptionComplete} confirms every encrypted item has been
+   * migrated to the current key, so no readable data is lost (AC 19.3).
+   */
+  clearPreviousEncryptionKey(): void {
+    this.previousEncryptionKey = null;
+  }
+
+  /**
+   * Returns whether a previous-key decryption fallback is currently active.
+   */
+  hasPreviousEncryptionKey(): boolean {
+    return this.previousEncryptionKey !== null;
   }
 
   /**
@@ -237,10 +289,10 @@ export class FileEncryptionService {
     const authTag = fileData.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
     const ciphertext = fileData.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
 
-    // Decrypt using AES-256-GCM
-    const decipher = crypto.createDecipheriv(ALGORITHM, this.encryptionKey, iv);
-    decipher.setAuthTag(authTag);
-    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    // Decrypt using AES-256-GCM. Try the CURRENT key first; if it fails and a
+    // previous-key fallback is active (mid-rotation), retry with the previous
+    // key so items not yet re-encrypted remain readable (AC 19.3, 19.4).
+    const decrypted = this.decryptWithFallback(iv, authTag, ciphertext, fileId);
 
     // Verify integrity via checksum comparison
     const computedChecksum = crypto.createHash('sha256').update(decrypted).digest('hex');
@@ -251,6 +303,48 @@ export class FileEncryptionService {
     }
 
     return { buffer: decrypted, metadata };
+  }
+
+  /**
+   * Decrypts a GCM ciphertext trying the current key first, then the previous
+   * key (decryption-only fallback) if one is configured. This is the core
+   * decrypt-with-fallback mechanism that keeps the previous secret valid for
+   * decryption during a rotation until re-encryption is verified complete
+   * (AC 19.3, 19.4).
+   *
+   * @throws Error if neither the current nor the previous key can decrypt/verify.
+   */
+  private decryptWithFallback(
+    iv: Buffer,
+    authTag: Buffer,
+    ciphertext: Buffer,
+    fileId: string,
+  ): Buffer {
+    const tryKey = (key: Buffer): Buffer => {
+      const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+      decipher.setAuthTag(authTag);
+      return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    };
+
+    try {
+      return tryKey(this.encryptionKey as Buffer);
+    } catch (currentErr) {
+      // Fall back to the previous key ONLY for decryption during rotation.
+      if (this.previousEncryptionKey) {
+        try {
+          const result = tryKey(this.previousEncryptionKey);
+          logger.debug(
+            `[FileEncryption] Decrypted ${fileId} with previous key (pending re-encryption).`
+          );
+          return result;
+        } catch {
+          // Both keys failed — surface the original (current-key) error below.
+        }
+      }
+      throw currentErr instanceof Error
+        ? currentErr
+        : new Error(`Decryption failed for fileId: ${fileId}`);
+    }
   }
 
   /**
@@ -505,5 +599,105 @@ export class FileEncryptionService {
 
     // Update the service's encryption key
     this.encryptionKey = derivedNewKey;
+  }
+
+  /**
+   * Re-encrypts the entire store from the previous key to the current key while
+   * keeping the previous key valid for decryption, then reports whether the
+   * migration is complete. This is the rotation-support entry point referenced
+   * by docs/key-rotation-procedure.md §2.أ (scheduled secret rotation):
+   *
+   *   1. caller sets the previous key via {@link setPreviousEncryptionKey} (or
+   *      FILE_ENCRYPTION_KEY_PREVIOUS) and the new current key via the
+   *      FILE_ENCRYPTION_KEY env / constructor;
+   *   2. caller invokes this method to advance every item's keyVersion;
+   *   3. only once {@link isReEncryptionComplete} returns true does the caller
+   *      call {@link clearPreviousEncryptionKey} and drop the old secret (AC 19.3).
+   *
+   * Items that fail to re-encrypt are left untouched and remain readable via the
+   * previous-key decryption fallback, so a partial failure never loses data
+   * (AC 19.4). The previous secret is never removed here.
+   *
+   * @param newKeyVersion The keyVersion to assign to successfully migrated items.
+   * @returns A summary of migrated / failed file ids.
+   */
+  async reEncryptStoreToCurrentKey(
+    newKeyVersion: number,
+  ): Promise<{ migrated: string[]; failed: string[] }> {
+    const migrated: string[] = [];
+    const failed: string[] = [];
+
+    if (!this.encryptionKey) {
+      throw new Error('Cannot re-encrypt: current FILE_ENCRYPTION_KEY is not set.');
+    }
+    if (!this.previousEncryptionKey) {
+      throw new Error(
+        'Cannot re-encrypt: previous key is not configured. Set FILE_ENCRYPTION_KEY_PREVIOUS or call setPreviousEncryptionKey().'
+      );
+    }
+
+    for (const [fileId, metadata] of this.metadataStore.entries()) {
+      // Skip unencrypted files and items already on the new key version.
+      if (!metadata.iv || metadata.keyVersion === 0 || metadata.keyVersion >= newKeyVersion) {
+        continue;
+      }
+
+      const encryptedPath = path.join(this.uploadDir, `${fileId}.enc`);
+      try {
+        const fileData = await fs.promises.readFile(encryptedPath);
+        const iv = fileData.subarray(0, IV_LENGTH);
+        const authTag = fileData.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+        const ciphertext = fileData.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+
+        // Decrypt with whichever key works (current or previous fallback).
+        const decrypted = this.decryptWithFallback(iv, authTag, ciphertext, fileId);
+
+        // Re-encrypt with the current key.
+        const newIv = crypto.randomBytes(IV_LENGTH);
+        const cipher = crypto.createCipheriv(ALGORITHM, this.encryptionKey, newIv);
+        const encrypted = Buffer.concat([cipher.update(decrypted), cipher.final()]);
+        const newAuthTag = cipher.getAuthTag();
+        const output = Buffer.concat([newIv, newAuthTag, encrypted]);
+        await fs.promises.writeFile(encryptedPath, output, { mode: 0o600 });
+
+        metadata.iv = newIv.toString('base64');
+        metadata.authTag = newAuthTag.toString('base64');
+        metadata.encryptedAt = new Date().toISOString();
+        metadata.keyVersion = newKeyVersion;
+        this.metadataStore.set(fileId, metadata);
+        migrated.push(fileId);
+      } catch (err) {
+        // Leave the item untouched; it stays readable via the previous-key
+        // fallback. Record the failure so the caller does NOT drop the old
+        // secret yet (AC 19.4).
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(
+          `[FileEncryption] Re-encryption failed for ${fileId}; item left readable with previous key: ${message}`
+        );
+        failed.push(fileId);
+      }
+    }
+
+    return { migrated, failed };
+  }
+
+  /**
+   * Returns true if every encrypted item in the store has reached at least the
+   * given key version, meaning re-encryption to the current key is complete and
+   * the previous secret can be safely dropped (AC 19.3). Unencrypted items
+   * (keyVersion === 0) are excluded from the check.
+   *
+   * Validates: Requirements 19.3
+   */
+  isReEncryptionComplete(targetKeyVersion: number): boolean {
+    for (const metadata of this.metadataStore.values()) {
+      if (!metadata.iv || metadata.keyVersion === 0) {
+        continue; // unencrypted/passthrough items are not part of the migration
+      }
+      if (metadata.keyVersion < targetKeyVersion) {
+        return false;
+      }
+    }
+    return true;
   }
 }

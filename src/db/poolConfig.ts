@@ -202,3 +202,164 @@ export function classifyDatabaseUrl(
 export function isEmbeddedDbAllowed(env: NodeJS.ProcessEnv): boolean {
   return env.ALLOW_EMBEDDED_DB === "true";
 }
+
+// ---------------------------------------------------------------------------
+// Resolved runtime pool configuration — clamping resolver (Requirements 7.1, 7.4, 7.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The default upper bound on the connection-pool size when `API_DB_CONN_CAP`
+ * is not provided in the environment. This documents the maximum number of
+ * concurrent connections allocated to API_Container. `DB_POOL_MAX` is never
+ * resolved above this cap (Req 7.4).
+ */
+export const DEFAULT_API_DB_CONN_CAP = 100;
+
+/**
+ * Fully-resolved, clamped runtime configuration for the PostgreSQL connection
+ * pool. Unlike {@link parsePoolConfig} — which *rejects* out-of-range values —
+ * this resolver is total: every input maps to a valid in-range value. Missing
+ * or non-numeric values resolve to the documented default, and out-of-range
+ * values are clamped to the nearest bound (Req 7.1, 7.4, 7.5).
+ */
+export interface ResolvedPoolConfig {
+  /** Maximum pooled connections. `DB_POOL_MAX`, default 10, in [1 .. API_DB_CONN_CAP]. */
+  max: number;
+  /**
+   * Time to wait for a connection from the pool, in ms. Mirrors
+   * {@link acquisitionTimeoutMillis} since `pg` uses `connectionTimeoutMillis`
+   * to bound pool acquisition.
+   */
+  connectionTimeoutMillis: number;
+  /** Pool acquisition timeout in ms. `DB_POOL_ACQUIRE_TIMEOUT_MS`, default 10000, clamped to [1000 .. 30000]. */
+  acquisitionTimeoutMillis: number;
+  /** Per-statement timeout in ms. `DB_STATEMENT_TIMEOUT_MS`, default 30000, clamped to [1000 .. 120000]. */
+  statementTimeoutMs: number;
+}
+
+const STATEMENT_TIMEOUT_DEFAULT = 30000;
+const STATEMENT_TIMEOUT_MIN = 1000;
+const STATEMENT_TIMEOUT_MAX = 120000;
+
+const ACQUIRE_TIMEOUT_DEFAULT = 10000;
+const ACQUIRE_TIMEOUT_MIN = 1000;
+const ACQUIRE_TIMEOUT_MAX = 30000;
+
+const POOL_MAX_DEFAULT = 10;
+const POOL_MAX_MIN = 1;
+
+/**
+ * Resolves a raw environment value to a finite number, or `null` when the
+ * value is unset, whitespace-only, or non-numeric. Accepts integers and
+ * decimals; rejects `NaN`, `Infinity`, and stray characters.
+ */
+function toFiniteNumber(raw: string | undefined): number | null {
+  if (raw === undefined) {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const value = Number(trimmed);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+/** Clamps `value` into the inclusive range [min, max]. */
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) {
+    return min;
+  }
+  if (value > max) {
+    return max;
+  }
+  return value;
+}
+
+/**
+ * Resolves a clamped millisecond timeout. Missing/non-numeric values resolve to
+ * `def`; in-range values pass through; out-of-range values clamp to the nearest
+ * bound.
+ */
+function resolveClampedMs(
+  raw: string | undefined,
+  min: number,
+  max: number,
+  def: number
+): number {
+  const value = toFiniteNumber(raw);
+  if (value === null) {
+    return def;
+  }
+  return clamp(value, min, max);
+}
+
+/**
+ * Resolves the connection cap (`API_DB_CONN_CAP`). Missing/non-numeric values
+ * resolve to {@link DEFAULT_API_DB_CONN_CAP}; otherwise the floored value is
+ * used, never below 1.
+ */
+function resolveConnCap(raw: string | undefined): number {
+  const value = toFiniteNumber(raw);
+  if (value === null) {
+    return DEFAULT_API_DB_CONN_CAP;
+  }
+  const floored = Math.floor(value);
+  return floored < POOL_MAX_MIN ? POOL_MAX_MIN : floored;
+}
+
+/**
+ * Resolves the pool size (`DB_POOL_MAX`) as a positive integer clamped to
+ * [1 .. cap]. Missing/non-numeric values resolve to the default (10, itself
+ * clamped to the cap); in-range values are floored to an integer; out-of-range
+ * values clamp to the nearest bound.
+ */
+function resolveMax(raw: string | undefined, cap: number): number {
+  const value = toFiniteNumber(raw);
+  const resolved = value === null ? POOL_MAX_DEFAULT : Math.floor(value);
+  return clamp(resolved, POOL_MAX_MIN, cap);
+}
+
+/**
+ * Pure, total resolver for the runtime pool configuration.
+ *
+ * Guarantees (Req 7.1, 7.4, 7.5):
+ * - `statementTimeoutMs` in [1000, 120000], default 30000.
+ * - `acquisitionTimeoutMillis` in [1000, 30000], default 10000.
+ * - `max` a positive integer in [1, API_DB_CONN_CAP], default 10.
+ * - Missing or non-numeric inputs resolve to the documented default.
+ * - Out-of-range inputs clamp to the nearest bound.
+ *
+ * `connectionTimeoutMillis` mirrors `acquisitionTimeoutMillis` because the `pg`
+ * driver uses `connectionTimeoutMillis` to bound pool-acquisition waits.
+ *
+ * Requirements: 7.1, 7.4, 7.5
+ */
+export function resolvePoolRuntimeConfig(
+  env: Record<string, string | undefined>
+): ResolvedPoolConfig {
+  const cap = resolveConnCap(env.API_DB_CONN_CAP);
+  const max = resolveMax(env.DB_POOL_MAX, cap);
+  const acquisitionTimeoutMillis = resolveClampedMs(
+    env.DB_POOL_ACQUIRE_TIMEOUT_MS,
+    ACQUIRE_TIMEOUT_MIN,
+    ACQUIRE_TIMEOUT_MAX,
+    ACQUIRE_TIMEOUT_DEFAULT
+  );
+  const statementTimeoutMs = resolveClampedMs(
+    env.DB_STATEMENT_TIMEOUT_MS,
+    STATEMENT_TIMEOUT_MIN,
+    STATEMENT_TIMEOUT_MAX,
+    STATEMENT_TIMEOUT_DEFAULT
+  );
+
+  return {
+    max,
+    connectionTimeoutMillis: acquisitionTimeoutMillis,
+    acquisitionTimeoutMillis,
+    statementTimeoutMs,
+  };
+}

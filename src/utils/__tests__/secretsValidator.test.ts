@@ -14,16 +14,21 @@ vi.mock('../logger', () => ({
 
 import logger from '../logger';
 
-/** Helper: creates a valid env object that passes all validations */
+/** Helper: creates a valid env object where all three secrets pass. */
 function createValidEnv(): Record<string, string> {
   return {
     JWT_SECRET: 'a'.repeat(64), // 64 chars, not a weak default
     VITE_STORAGE_SECRET: 'b'.repeat(32), // 32 chars, not a weak default
     VITE_NETWORK_SECRET: 'some-strong-network-secret-value',
-    DATABASE_URL: 'postgresql://user:pass@localhost:5432/alsaqi',
-    CORS_ORIGIN: 'https://alsaqi.example.com',
-    FILE_ENCRYPTION_KEY: 'c'.repeat(32),
   };
+}
+
+/** Helper: finds a failure entry for a given variable. */
+function failureFor(
+  result: ReturnType<typeof validateProductionSecrets>,
+  variable: string
+) {
+  return result.failures.find((f) => f.variable === variable);
 }
 
 describe('validateProductionSecrets', () => {
@@ -35,9 +40,7 @@ describe('validateProductionSecrets', () => {
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContainEqual(
-        expect.stringContaining('JWT_SECRET')
-      );
+      expect(failureFor(result, 'JWT_SECRET')?.reason).toBe('weak-default');
     });
 
     it('should reject VITE_STORAGE_SECRET with weak default value', () => {
@@ -47,9 +50,7 @@ describe('validateProductionSecrets', () => {
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContainEqual(
-        expect.stringContaining('VITE_STORAGE_SECRET')
-      );
+      expect(failureFor(result, 'VITE_STORAGE_SECRET')?.reason).toBe('weak-default');
     });
 
     it('should reject VITE_NETWORK_SECRET with weak default value', () => {
@@ -59,9 +60,7 @@ describe('validateProductionSecrets', () => {
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContainEqual(
-        expect.stringContaining('VITE_NETWORK_SECRET')
-      );
+      expect(failureFor(result, 'VITE_NETWORK_SECRET')?.reason).toBe('weak-default');
     });
   });
 
@@ -73,9 +72,7 @@ describe('validateProductionSecrets', () => {
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContainEqual(
-        expect.stringContaining('JWT_SECRET must be at least 64 characters')
-      );
+      expect(failureFor(result, 'JWT_SECRET')?.reason).toBe('too-short');
     });
 
     it('should reject VITE_STORAGE_SECRET shorter than 32 characters', () => {
@@ -85,60 +82,52 @@ describe('validateProductionSecrets', () => {
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContainEqual(
-        expect.stringContaining('VITE_STORAGE_SECRET must be at least 32 characters')
-      );
+      expect(failureFor(result, 'VITE_STORAGE_SECRET')?.reason).toBe('too-short');
     });
   });
 
-  describe('missing DATABASE_URL rejected', () => {
-    it('should reject when DATABASE_URL is undefined', () => {
+  describe('missing secrets rejected', () => {
+    it('should reject when JWT_SECRET is undefined', () => {
       const env = createValidEnv();
-      delete (env as Record<string, string | undefined>).DATABASE_URL;
+      delete (env as Record<string, string | undefined>).JWT_SECRET;
 
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContainEqual(
-        expect.stringContaining('DATABASE_URL')
-      );
+      expect(failureFor(result, 'JWT_SECRET')?.reason).toBe('missing');
+    });
+
+    it('should reject when VITE_NETWORK_SECRET is empty', () => {
+      const env = createValidEnv();
+      env.VITE_NETWORK_SECRET = '';
+
+      const result = validateProductionSecrets(env);
+
+      expect(result.isValid).toBe(false);
+      expect(failureFor(result, 'VITE_NETWORK_SECRET')?.reason).toBe('missing');
     });
   });
 
   describe('valid secrets accepted', () => {
-    it('should accept all secrets meeting requirements', () => {
+    it('should accept all three secrets meeting requirements with no failures', () => {
       const env = createValidEnv();
 
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(true);
-      expect(result.errors).toHaveLength(0);
-    });
-  });
-
-  describe('warnings for optional variables', () => {
-    it('should warn when CORS_ORIGIN is not set', () => {
-      const env = createValidEnv();
-      delete (env as Record<string, string | undefined>).CORS_ORIGIN;
-
-      const result = validateProductionSecrets(env);
-
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContainEqual(
-        expect.stringContaining('CORS_ORIGIN')
-      );
+      expect(result.failures).toHaveLength(0);
     });
 
-    it('should warn when FILE_ENCRYPTION_KEY is not set', () => {
+    it('should ignore unrelated environment variables', () => {
       const env = createValidEnv();
-      delete (env as Record<string, string | undefined>).FILE_ENCRYPTION_KEY;
+      // Adding/removing unrelated vars must not affect the secrets gate.
+      delete (env as Record<string, string | undefined>).DATABASE_URL;
+      env.CORS_ORIGIN = 'https://alsaqi.example.com';
 
       const result = validateProductionSecrets(env);
 
       expect(result.isValid).toBe(true);
-      expect(result.warnings).toContainEqual(
-        expect.stringContaining('FILE_ENCRYPTION_KEY')
-      );
+      expect(result.failures).toHaveLength(0);
     });
   });
 });
@@ -149,55 +138,83 @@ describe('runSecretsValidation', () => {
   });
 
   describe('development mode allows weak secrets with warnings', () => {
-    it('should NOT exit and should log warnings when NODE_ENV=development with weak secrets', () => {
+    it('should NOT exit and should log warnings when not in production with weak secrets', () => {
       const env: Record<string, string> = {
         NODE_ENV: 'development',
         JWT_SECRET: 'alsaqi-dev-secret-key-123',
         VITE_STORAGE_SECRET: 'your-32-character-secret-key-here',
         VITE_NETWORK_SECRET: 'your-network-hmac-secret-here',
-        DATABASE_URL: 'postgresql://localhost/test',
       };
+      const exit = vi.fn();
 
-      const result = runSecretsValidation(env);
+      const result = runSecretsValidation(env, { exit: exit as unknown as (code: number) => never });
 
-      // Should return the validation result (errors present but not blocking)
+      // Should return the validation result (failures present but not blocking)
       expect(result.isValid).toBe(false);
-      // Should log warnings, not errors
+      // Should log warnings, not errors, and must NOT terminate the process
       expect(logger.warn).toHaveBeenCalled();
-      // Should NOT log errors (production-only behavior)
       expect(logger.error).not.toHaveBeenCalled();
+      expect(exit).not.toHaveBeenCalled();
     });
 
-    it('should log debug messages for optional variable warnings in development', () => {
+    it('should not log or exit when secrets are valid', () => {
       const env: Record<string, string> = {
         NODE_ENV: 'development',
         JWT_SECRET: 'a'.repeat(64),
         VITE_STORAGE_SECRET: 'b'.repeat(32),
         VITE_NETWORK_SECRET: 'strong-network-secret',
-        DATABASE_URL: 'postgresql://localhost/test',
       };
+      const exit = vi.fn();
 
-      const result = runSecretsValidation(env);
+      const result = runSecretsValidation(env, { exit: exit as unknown as (code: number) => never });
 
       expect(result.isValid).toBe(true);
-      // Optional variable warnings should be logged as debug in development
-      expect(logger.debug).toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(exit).not.toHaveBeenCalled();
     });
   });
 
-  describe('production mode logs errors', () => {
-    it('should log errors when NODE_ENV=production with invalid secrets', () => {
+  describe('production mode logs errors and exits', () => {
+    it('should log FATAL errors and exit(1) when in production with invalid secrets', () => {
       const env: Record<string, string> = {
         NODE_ENV: 'production',
         JWT_SECRET: 'alsaqi-dev-secret-key-123',
         VITE_STORAGE_SECRET: 'your-32-character-secret-key-here',
         VITE_NETWORK_SECRET: 'your-network-hmac-secret-here',
       };
+      const exit = vi.fn();
 
-      const result = runSecretsValidation(env);
+      const result = runSecretsValidation(env, {
+        isProduction: true,
+        exit: exit as unknown as (code: number) => never,
+      });
 
       expect(result.isValid).toBe(false);
       expect(logger.error).toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(1);
+    });
+
+    it('should never print actual secret values in log messages', () => {
+      const env: Record<string, string> = {
+        NODE_ENV: 'production',
+        JWT_SECRET: 'super-secret-jwt-value-that-must-not-leak',
+        VITE_STORAGE_SECRET: 'short-secret',
+        VITE_NETWORK_SECRET: 'your-network-hmac-secret-here',
+      };
+      const exit = vi.fn();
+
+      runSecretsValidation(env, {
+        isProduction: true,
+        exit: exit as unknown as (code: number) => never,
+      });
+
+      const loggedMessages = (logger.error as ReturnType<typeof vi.fn>).mock.calls
+        .flat()
+        .filter((arg): arg is string => typeof arg === 'string');
+      for (const value of Object.values(env)) {
+        if (value === 'production') continue;
+        expect(loggedMessages.some((m) => m.includes(value))).toBe(false);
+      }
     });
   });
 });

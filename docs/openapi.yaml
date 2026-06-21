@@ -1,0 +1,1824 @@
+openapi: 3.0.3
+info:
+  title: Alsaqi Internal Audit API
+  version: 1.0.0
+  description: >-
+    Auto-generated OpenAPI contract for the Alsaqi backend. Operations are
+    derived from the routes registered under /api/v1 in
+    src/routes/v1/index.ts. The Docs_Endpoint (GET /docs) is intentionally
+    excluded from this contract.
+servers:
+  - url: /api/v1
+    description: Versioned API base path
+paths:
+  '/admin/backup':
+    post:
+      summary: POST /admin/backup
+      operationId: post_admin_backup
+      responses:
+        '201':
+          description: Successful response
+  '/admin/backup/history':
+    get:
+      summary: GET /admin/backup/history
+      operationId: get_admin_backup_history
+      responses:
+        '200':
+          description: Successful response
+  '/analytics/findings-by-risk':
+    get:
+      summary: GET /analytics/findings-by-risk
+      operationId: get_analytics_findings_by_risk
+      responses:
+        '200':
+          description: Successful response
+  '/analytics/findings-by-status':
+    get:
+      summary: GET /analytics/findings-by-status
+      operationId: get_analytics_findings_by_status
+      responses:
+        '200':
+          description: Successful response
+  '/analytics/recommendations-by-status':
+    get:
+      summary: GET /analytics/recommendations-by-status
+      operationId: get_analytics_recommendations_by_status
+      responses:
+        '200':
+          description: Successful response
+  '/app-settings':
+    get:
+      summary: GET /app-settings
+      operationId: get_app_settings
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /app-settings
+      operationId: put_app_settings
+      responses:
+        '200':
+          description: Successful response
+  '/archived-plans':
+    get:
+      summary: GET /archived-plans
+      operationId: get_archived_plans
+      responses:
+        '200':
+          description: Successful response
+  '/archived-plans/{year}':
+    parameters:
+      - name: year
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /archived-plans/{year}
+      operationId: get_archived_plans_year
+      responses:
+        '200':
+          description: Successful response
+  '/audit-evidence':
+    get:
+      summary: GET /audit-evidence
+      operationId: get_audit_evidence
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-evidence
+      operationId: post_audit_evidence
+      responses:
+        '201':
+          description: Successful response
+  '/audit-evidence/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-evidence/{id}
+      operationId: get_audit_evidence_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /audit-evidence/{id}
+      operationId: put_audit_evidence_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-evidence/{id}
+      operationId: delete_audit_evidence_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-findings':
+    get:
+      summary: GET /audit-findings
+      operationId: get_audit_findings
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-findings
+      operationId: post_audit_findings
+      responses:
+        '201':
+          description: Successful response
+  '/audit-findings/by-plan/{planId}':
+    parameters:
+      - name: planId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-findings/by-plan/{planId}
+      operationId: get_audit_findings_by_plan_planId
+      responses:
+        '200':
+          description: Successful response
+  '/audit-findings/{findingId}/evidence':
+    parameters:
+      - name: findingId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-findings/{findingId}/evidence
+      operationId: get_audit_findings_findingId_evidence
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-findings/{findingId}/evidence
+      operationId: post_audit_findings_findingId_evidence
+      responses:
+        '201':
+          description: Successful response
+  '/audit-findings/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-findings/{id}
+      operationId: get_audit_findings_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /audit-findings/{id}
+      operationId: put_audit_findings_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-findings/{id}
+      operationId: delete_audit_findings_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-findings/{id}/status':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      summary: PATCH /audit-findings/{id}/status
+      operationId: patch_audit_findings_id_status
+      responses:
+        '200':
+          description: Successful response
+  '/audit-logs/permissions':
+    get:
+      summary: GET /audit-logs/permissions
+      operationId: get_audit_logs_permissions
+      responses:
+        '200':
+          description: Successful response
+  '/audit-plans':
+    get:
+      summary: GET /audit-plans
+      operationId: get_audit_plans
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-plans
+      operationId: post_audit_plans
+      responses:
+        '201':
+          description: Successful response
+  '/audit-plans/can-create':
+    get:
+      summary: GET /audit-plans/can-create
+      operationId: get_audit_plans_can_create
+      responses:
+        '200':
+          description: Successful response
+  '/audit-plans/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-plans/{id}
+      operationId: get_audit_plans_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /audit-plans/{id}
+      operationId: put_audit_plans_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-plans/{id}
+      operationId: delete_audit_plans_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-plans/{id}/archive':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /audit-plans/{id}/archive
+      operationId: post_audit_plans_id_archive
+      responses:
+        '201':
+          description: Successful response
+  '/audit-procedures':
+    get:
+      summary: GET /audit-procedures
+      operationId: get_audit_procedures
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-procedures
+      operationId: post_audit_procedures
+      responses:
+        '201':
+          description: Successful response
+  '/audit-procedures/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-procedures/{id}
+      operationId: get_audit_procedures_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /audit-procedures/{id}
+      operationId: put_audit_procedures_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-procedures/{id}
+      operationId: delete_audit_procedures_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-programs':
+    get:
+      summary: GET /audit-programs
+      operationId: get_audit_programs
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-programs
+      operationId: post_audit_programs
+      responses:
+        '201':
+          description: Successful response
+  '/audit-programs/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-programs/{id}
+      operationId: get_audit_programs_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /audit-programs/{id}
+      operationId: put_audit_programs_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-programs/{id}
+      operationId: delete_audit_programs_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-programs/{id}/approve':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /audit-programs/{id}/approve
+      operationId: post_audit_programs_id_approve
+      responses:
+        '201':
+          description: Successful response
+  '/audit-programs/{id}/duplicate':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /audit-programs/{id}/duplicate
+      operationId: post_audit_programs_id_duplicate
+      responses:
+        '201':
+          description: Successful response
+  '/audit-reports':
+    get:
+      summary: GET /audit-reports
+      operationId: get_audit_reports
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-reports
+      operationId: post_audit_reports
+      responses:
+        '201':
+          description: Successful response
+  '/audit-reports/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /audit-reports/{id}
+      operationId: get_audit_reports_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /audit-reports/{id}
+      operationId: put_audit_reports_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-reports/{id}
+      operationId: delete_audit_reports_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-tasks':
+    get:
+      summary: GET /audit-tasks
+      operationId: get_audit_tasks
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /audit-tasks
+      operationId: post_audit_tasks
+      responses:
+        '201':
+          description: Successful response
+  '/audit-tasks/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /audit-tasks/{id}
+      operationId: put_audit_tasks_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /audit-tasks/{id}
+      operationId: delete_audit_tasks_id
+      responses:
+        '200':
+          description: Successful response
+  '/audit-tasks/{id}/assign':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /audit-tasks/{id}/assign
+      operationId: post_audit_tasks_id_assign
+      responses:
+        '201':
+          description: Successful response
+  '/audit-tasks/{id}/assign/{userId}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      summary: DELETE /audit-tasks/{id}/assign/{userId}
+      operationId: delete_audit_tasks_id_assign_userId
+      responses:
+        '200':
+          description: Successful response
+  '/audit-tasks/{id}/status':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      summary: PATCH /audit-tasks/{id}/status
+      operationId: patch_audit_tasks_id_status
+      responses:
+        '200':
+          description: Successful response
+  '/audit-trail':
+    get:
+      summary: GET /audit-trail
+      operationId: get_audit_trail
+      responses:
+        '200':
+          description: Successful response
+  '/auth/2fa':
+    delete:
+      summary: DELETE /auth/2fa
+      operationId: delete_auth_2fa
+      responses:
+        '200':
+          description: Successful response
+  '/auth/2fa/backup':
+    post:
+      summary: POST /auth/2fa/backup
+      operationId: post_auth_2fa_backup
+      responses:
+        '201':
+          description: Successful response
+  '/auth/2fa/setup':
+    post:
+      summary: POST /auth/2fa/setup
+      operationId: post_auth_2fa_setup
+      responses:
+        '201':
+          description: Successful response
+  '/auth/2fa/setup-complete':
+    post:
+      summary: POST /auth/2fa/setup-complete
+      operationId: post_auth_2fa_setup_complete
+      responses:
+        '201':
+          description: Successful response
+  '/auth/2fa/setup-pending':
+    post:
+      summary: POST /auth/2fa/setup-pending
+      operationId: post_auth_2fa_setup_pending
+      responses:
+        '201':
+          description: Successful response
+  '/auth/2fa/validate':
+    post:
+      summary: POST /auth/2fa/validate
+      operationId: post_auth_2fa_validate
+      responses:
+        '201':
+          description: Successful response
+  '/auth/2fa/verify':
+    post:
+      summary: POST /auth/2fa/verify
+      operationId: post_auth_2fa_verify
+      responses:
+        '201':
+          description: Successful response
+  '/auth/approve-reset':
+    post:
+      summary: POST /auth/approve-reset
+      operationId: post_auth_approve_reset
+      responses:
+        '201':
+          description: Successful response
+  '/auth/change-password':
+    post:
+      summary: POST /auth/change-password
+      operationId: post_auth_change_password
+      responses:
+        '201':
+          description: Successful response
+  '/auth/forgot-password':
+    post:
+      summary: POST /auth/forgot-password
+      operationId: post_auth_forgot_password
+      responses:
+        '201':
+          description: Successful response
+  '/auth/login':
+    post:
+      summary: POST /auth/login
+      operationId: post_auth_login
+      responses:
+        '201':
+          description: Successful response
+  '/auth/logout':
+    post:
+      summary: POST /auth/logout
+      operationId: post_auth_logout
+      responses:
+        '201':
+          description: Successful response
+  '/auth/logout-all':
+    post:
+      summary: POST /auth/logout-all
+      operationId: post_auth_logout_all
+      responses:
+        '201':
+          description: Successful response
+  '/auth/me':
+    get:
+      summary: GET /auth/me
+      operationId: get_auth_me
+      responses:
+        '200':
+          description: Successful response
+  '/auth/refresh':
+    post:
+      summary: POST /auth/refresh
+      operationId: post_auth_refresh
+      responses:
+        '201':
+          description: Successful response
+  '/auth/reject-reset':
+    post:
+      summary: POST /auth/reject-reset
+      operationId: post_auth_reject_reset
+      responses:
+        '201':
+          description: Successful response
+  '/auth/reset-requests':
+    get:
+      summary: GET /auth/reset-requests
+      operationId: get_auth_reset_requests
+      responses:
+        '200':
+          description: Successful response
+  '/auth/reset-status/{username}':
+    parameters:
+      - name: username
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /auth/reset-status/{username}
+      operationId: get_auth_reset_status_username
+      responses:
+        '200':
+          description: Successful response
+  '/auth/update-password':
+    post:
+      summary: POST /auth/update-password
+      operationId: post_auth_update_password
+      responses:
+        '201':
+          description: Successful response
+  '/auth/ws-token':
+    get:
+      summary: GET /auth/ws-token
+      operationId: get_auth_ws_token
+      responses:
+        '200':
+          description: Successful response
+  '/bulk/{resource}':
+    parameters:
+      - name: resource
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /bulk/{resource}
+      operationId: post_bulk_resource
+      responses:
+        '201':
+          description: Successful response
+  '/central-bank-instructions':
+    get:
+      summary: GET /central-bank-instructions
+      operationId: get_central_bank_instructions
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /central-bank-instructions
+      operationId: post_central_bank_instructions
+      responses:
+        '201':
+          description: Successful response
+  '/central-bank-instructions/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /central-bank-instructions/{id}
+      operationId: get_central_bank_instructions_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /central-bank-instructions/{id}
+      operationId: put_central_bank_instructions_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /central-bank-instructions/{id}
+      operationId: delete_central_bank_instructions_id
+      responses:
+        '200':
+          description: Successful response
+  '/coi':
+    get:
+      summary: GET /coi
+      operationId: get_coi
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /coi
+      operationId: post_coi
+      responses:
+        '201':
+          description: Successful response
+  '/coi/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /coi/{id}
+      operationId: put_coi_id
+      responses:
+        '200':
+          description: Successful response
+  '/comments':
+    post:
+      summary: POST /comments
+      operationId: post_comments
+      responses:
+        '201':
+          description: Successful response
+  '/comments/{type}/{id}':
+    parameters:
+      - name: type
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /comments/{type}/{id}
+      operationId: get_comments_type_id
+      responses:
+        '200':
+          description: Successful response
+  '/compliance':
+    get:
+      summary: GET /compliance
+      operationId: get_compliance
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /compliance
+      operationId: post_compliance
+      responses:
+        '201':
+          description: Successful response
+  '/compliance-items/lookup':
+    get:
+      summary: GET /compliance-items/lookup
+      operationId: get_compliance_items_lookup
+      responses:
+        '200':
+          description: Successful response
+  '/compliance/summary':
+    get:
+      summary: GET /compliance/summary
+      operationId: get_compliance_summary
+      responses:
+        '200':
+          description: Successful response
+  '/compliance/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /compliance/{id}
+      operationId: get_compliance_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /compliance/{id}
+      operationId: put_compliance_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /compliance/{id}
+      operationId: delete_compliance_id
+      responses:
+        '200':
+          description: Successful response
+  '/compliance/{id}/status':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      summary: PATCH /compliance/{id}/status
+      operationId: patch_compliance_id_status
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/archive':
+    get:
+      summary: GET /correspondence/archive
+      operationId: get_correspondence_archive
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/archive/{type}/{id}':
+    parameters:
+      - name: type
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /correspondence/archive/{type}/{id}
+      operationId: put_correspondence_archive_type_id
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/attachments':
+    post:
+      summary: POST /correspondence/attachments
+      operationId: post_correspondence_attachments
+      responses:
+        '201':
+          description: Successful response
+  '/correspondence/attachments/{type}/{id}':
+    parameters:
+      - name: type
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /correspondence/attachments/{type}/{id}
+      operationId: get_correspondence_attachments_type_id
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/details/{type}/{id}':
+    parameters:
+      - name: type
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /correspondence/details/{type}/{id}
+      operationId: get_correspondence_details_type_id
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/incoming':
+    get:
+      summary: GET /correspondence/incoming
+      operationId: get_correspondence_incoming
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /correspondence/incoming
+      operationId: post_correspondence_incoming
+      responses:
+        '201':
+          description: Successful response
+  '/correspondence/incoming/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /correspondence/incoming/{id}
+      operationId: put_correspondence_incoming_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /correspondence/incoming/{id}
+      operationId: delete_correspondence_incoming_id
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/link':
+    post:
+      summary: POST /correspondence/link
+      operationId: post_correspondence_link
+      responses:
+        '201':
+          description: Successful response
+  '/correspondence/outgoing':
+    get:
+      summary: GET /correspondence/outgoing
+      operationId: get_correspondence_outgoing
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /correspondence/outgoing
+      operationId: post_correspondence_outgoing
+      responses:
+        '201':
+          description: Successful response
+  '/correspondence/outgoing/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /correspondence/outgoing/{id}
+      operationId: put_correspondence_outgoing_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /correspondence/outgoing/{id}
+      operationId: delete_correspondence_outgoing_id
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/refer':
+    post:
+      summary: POST /correspondence/refer
+      operationId: post_correspondence_refer
+      responses:
+        '201':
+          description: Successful response
+  '/correspondence/stats':
+    get:
+      summary: GET /correspondence/stats
+      operationId: get_correspondence_stats
+      responses:
+        '200':
+          description: Successful response
+  '/correspondence/status/{type}/{id}':
+    parameters:
+      - name: type
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /correspondence/status/{type}/{id}
+      operationId: put_correspondence_status_type_id
+      responses:
+        '200':
+          description: Successful response
+  '/dashboard-stats':
+    get:
+      summary: GET /dashboard-stats
+      operationId: get_dashboard_stats
+      responses:
+        '200':
+          description: Successful response
+  '/departments':
+    get:
+      summary: GET /departments
+      operationId: get_departments
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /departments
+      operationId: post_departments
+      responses:
+        '201':
+          description: Successful response
+  '/departments/tree':
+    get:
+      summary: GET /departments/tree
+      operationId: get_departments_tree
+      responses:
+        '200':
+          description: Successful response
+  '/departments/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /departments/{id}
+      operationId: put_departments_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /departments/{id}
+      operationId: delete_departments_id
+      responses:
+        '200':
+          description: Successful response
+  '/executive-summary':
+    get:
+      summary: GET /executive-summary
+      operationId: get_executive_summary
+      responses:
+        '200':
+          description: Successful response
+  '/fraud-access-requests':
+    get:
+      summary: GET /fraud-access-requests
+      operationId: get_fraud_access_requests
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /fraud-access-requests
+      operationId: post_fraud_access_requests
+      responses:
+        '201':
+          description: Successful response
+  '/fraud-access-requests/my-status':
+    get:
+      summary: GET /fraud-access-requests/my-status
+      operationId: get_fraud_access_requests_my_status
+      responses:
+        '200':
+          description: Successful response
+  '/fraud-access-requests/{id}/approve':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /fraud-access-requests/{id}/approve
+      operationId: put_fraud_access_requests_id_approve
+      responses:
+        '200':
+          description: Successful response
+  '/fraud-access-requests/{id}/reject':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /fraud-access-requests/{id}/reject
+      operationId: put_fraud_access_requests_id_reject
+      responses:
+        '200':
+          description: Successful response
+  '/fraud-log':
+    get:
+      summary: GET /fraud-log
+      operationId: get_fraud_log
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /fraud-log
+      operationId: post_fraud_log
+      responses:
+        '201':
+          description: Successful response
+  '/fraud-log/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /fraud-log/{id}
+      operationId: get_fraud_log_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /fraud-log/{id}
+      operationId: put_fraud_log_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /fraud-log/{id}
+      operationId: delete_fraud_log_id
+      responses:
+        '200':
+          description: Successful response
+  '/health':
+    get:
+      summary: GET /health
+      operationId: get_health
+      responses:
+        '200':
+          description: Successful response
+  '/integrity/stats':
+    get:
+      summary: GET /integrity/stats
+      operationId: get_integrity_stats
+      responses:
+        '200':
+          description: Successful response
+  '/job-titles':
+    get:
+      summary: GET /job-titles
+      operationId: get_job_titles
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /job-titles
+      operationId: post_job_titles
+      responses:
+        '201':
+          description: Successful response
+  '/job-titles/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /job-titles/{id}
+      operationId: put_job_titles_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /job-titles/{id}
+      operationId: delete_job_titles_id
+      responses:
+        '200':
+          description: Successful response
+  '/law-bank':
+    get:
+      summary: GET /law-bank
+      operationId: get_law_bank
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /law-bank
+      operationId: post_law_bank
+      responses:
+        '201':
+          description: Successful response
+  '/law-bank/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /law-bank/{id}
+      operationId: get_law_bank_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /law-bank/{id}
+      operationId: put_law_bank_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /law-bank/{id}
+      operationId: delete_law_bank_id
+      responses:
+        '200':
+          description: Successful response
+  '/log-error':
+    post:
+      summary: POST /log-error
+      operationId: post_log_error
+      responses:
+        '201':
+          description: Successful response
+  '/login-history':
+    get:
+      summary: GET /login-history
+      operationId: get_login_history
+      responses:
+        '200':
+          description: Successful response
+  '/metrics/web-vitals':
+    post:
+      summary: POST /metrics/web-vitals
+      operationId: post_metrics_web_vitals
+      responses:
+        '201':
+          description: Successful response
+  '/my-tasks':
+    get:
+      summary: GET /my-tasks
+      operationId: get_my_tasks
+      responses:
+        '200':
+          description: Successful response
+  '/notifications':
+    get:
+      summary: GET /notifications
+      operationId: get_notifications
+      responses:
+        '200':
+          description: Successful response
+  '/notifications/mark-all-read':
+    put:
+      summary: PUT /notifications/mark-all-read
+      operationId: put_notifications_mark_all_read
+      responses:
+        '200':
+          description: Successful response
+  '/notifications/unread-count':
+    get:
+      summary: GET /notifications/unread-count
+      operationId: get_notifications_unread_count
+      responses:
+        '200':
+          description: Successful response
+  '/notifications/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      summary: DELETE /notifications/{id}
+      operationId: delete_notifications_id
+      responses:
+        '200':
+          description: Successful response
+  '/notifications/{id}/read':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /notifications/{id}/read
+      operationId: put_notifications_id_read
+      responses:
+        '200':
+          description: Successful response
+  '/org-entities':
+    get:
+      summary: GET /org-entities
+      operationId: get_org_entities
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /org-entities
+      operationId: post_org_entities
+      responses:
+        '201':
+          description: Successful response
+  '/org-entities/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /org-entities/{id}
+      operationId: put_org_entities_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /org-entities/{id}
+      operationId: delete_org_entities_id
+      responses:
+        '200':
+          description: Successful response
+  '/pdf-settings':
+    get:
+      summary: GET /pdf-settings
+      operationId: get_pdf_settings
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /pdf-settings
+      operationId: put_pdf_settings
+      responses:
+        '200':
+          description: Successful response
+  '/pdf-templates':
+    get:
+      summary: GET /pdf-templates
+      operationId: get_pdf_templates
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /pdf-templates
+      operationId: post_pdf_templates
+      responses:
+        '201':
+          description: Successful response
+  '/pdf-templates/active':
+    get:
+      summary: GET /pdf-templates/active
+      operationId: get_pdf_templates_active
+      responses:
+        '200':
+          description: Successful response
+  '/pdf-templates/preview-html':
+    post:
+      summary: POST /pdf-templates/preview-html
+      operationId: post_pdf_templates_preview_html
+      responses:
+        '201':
+          description: Successful response
+  '/pdf-templates/preview-pdf':
+    post:
+      summary: POST /pdf-templates/preview-pdf
+      operationId: post_pdf_templates_preview_pdf
+      responses:
+        '201':
+          description: Successful response
+  '/pdf-templates/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /pdf-templates/{id}
+      operationId: get_pdf_templates_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /pdf-templates/{id}
+      operationId: put_pdf_templates_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /pdf-templates/{id}
+      operationId: delete_pdf_templates_id
+      responses:
+        '200':
+          description: Successful response
+  '/permissions':
+    get:
+      summary: GET /permissions
+      operationId: get_permissions
+      responses:
+        '200':
+          description: Successful response
+  '/permissions/me':
+    get:
+      summary: GET /permissions/me
+      operationId: get_permissions_me
+      responses:
+        '200':
+          description: Successful response
+  '/permissions/modules':
+    get:
+      summary: GET /permissions/modules
+      operationId: get_permissions_modules
+      responses:
+        '200':
+          description: Successful response
+  '/policies':
+    get:
+      summary: GET /policies
+      operationId: get_policies
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /policies
+      operationId: post_policies
+      responses:
+        '201':
+          description: Successful response
+  '/policies/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /policies/{id}
+      operationId: get_policies_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /policies/{id}
+      operationId: put_policies_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /policies/{id}
+      operationId: delete_policies_id
+      responses:
+        '200':
+          description: Successful response
+  '/policies/{id}/file':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /policies/{id}/file
+      operationId: get_policies_id_file
+      responses:
+        '200':
+          description: Successful response
+  '/preferences':
+    put:
+      summary: PUT /preferences
+      operationId: put_preferences
+      responses:
+        '200':
+          description: Successful response
+  '/profile':
+    get:
+      summary: GET /profile
+      operationId: get_profile
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /profile
+      operationId: put_profile
+      responses:
+        '200':
+          description: Successful response
+  '/recommendations':
+    get:
+      summary: GET /recommendations
+      operationId: get_recommendations
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /recommendations
+      operationId: post_recommendations
+      responses:
+        '201':
+          description: Successful response
+  '/recommendations/{id}/resolve':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      summary: PATCH /recommendations/{id}/resolve
+      operationId: patch_recommendations_id_resolve
+      responses:
+        '200':
+          description: Successful response
+  '/reports/generate':
+    post:
+      summary: POST /reports/generate
+      operationId: post_reports_generate
+      responses:
+        '201':
+          description: Successful response
+  '/reports/{reportId}/status':
+    parameters:
+      - name: reportId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /reports/{reportId}/status
+      operationId: get_reports_reportId_status
+      responses:
+        '200':
+          description: Successful response
+  '/risk-register':
+    get:
+      summary: GET /risk-register
+      operationId: get_risk_register
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /risk-register
+      operationId: post_risk_register
+      responses:
+        '201':
+          description: Successful response
+  '/risk-register/lookup':
+    get:
+      summary: GET /risk-register/lookup
+      operationId: get_risk_register_lookup
+      responses:
+        '200':
+          description: Successful response
+  '/risk-register/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /risk-register/{id}
+      operationId: get_risk_register_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /risk-register/{id}
+      operationId: put_risk_register_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /risk-register/{id}
+      operationId: delete_risk_register_id
+      responses:
+        '200':
+          description: Successful response
+  '/roles':
+    get:
+      summary: GET /roles
+      operationId: get_roles
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /roles
+      operationId: post_roles
+      responses:
+        '201':
+          description: Successful response
+  '/roles/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: PUT /roles/{id}
+      operationId: put_roles_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /roles/{id}
+      operationId: delete_roles_id
+      responses:
+        '200':
+          description: Successful response
+  '/roles/{id}/permissions':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /roles/{id}/permissions
+      operationId: get_roles_id_permissions
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /roles/{id}/permissions
+      operationId: post_roles_id_permissions
+      responses:
+        '201':
+          description: Successful response
+  '/session-config':
+    get:
+      summary: GET /session-config
+      operationId: get_session_config
+      responses:
+        '200':
+          description: Successful response
+  '/system-errors':
+    get:
+      summary: GET /system-errors
+      operationId: get_system_errors
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /system-errors
+      operationId: post_system_errors
+      responses:
+        '201':
+          description: Successful response
+    delete:
+      summary: DELETE /system-errors
+      operationId: delete_system_errors
+      responses:
+        '200':
+          description: Successful response
+  '/system-errors/analytics':
+    get:
+      summary: GET /system-errors/analytics
+      operationId: get_system_errors_analytics
+      responses:
+        '200':
+          description: Successful response
+  '/system-errors/export':
+    get:
+      summary: GET /system-errors/export
+      operationId: get_system_errors_export
+      responses:
+        '200':
+          description: Successful response
+  '/user-management-settings':
+    get:
+      summary: GET /user-management-settings
+      operationId: get_user_management_settings
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /user-management-settings
+      operationId: put_user_management_settings
+      responses:
+        '200':
+          description: Successful response
+  '/user-sessions':
+    get:
+      summary: GET /user-sessions
+      operationId: get_user_sessions
+      responses:
+        '200':
+          description: Successful response
+  '/user-sessions/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      summary: DELETE /user-sessions/{id}
+      operationId: delete_user_sessions_id
+      responses:
+        '200':
+          description: Successful response
+  '/users':
+    get:
+      summary: GET /users
+      operationId: get_users
+      responses:
+        '200':
+          description: Successful response
+    post:
+      summary: POST /users
+      operationId: post_users
+      responses:
+        '201':
+          description: Successful response
+  '/users/init':
+    get:
+      summary: GET /users/init
+      operationId: get_users_init
+      responses:
+        '200':
+          description: Successful response
+  '/users/list':
+    get:
+      summary: GET /users/list
+      operationId: get_users_list
+      responses:
+        '200':
+          description: Successful response
+  '/users/summary':
+    get:
+      summary: GET /users/summary
+      operationId: get_users_summary
+      responses:
+        '200':
+          description: Successful response
+  '/users/{id}':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /users/{id}
+      operationId: get_users_id
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /users/{id}
+      operationId: put_users_id
+      responses:
+        '200':
+          description: Successful response
+    delete:
+      summary: DELETE /users/{id}
+      operationId: delete_users_id
+      responses:
+        '200':
+          description: Successful response
+  '/users/{id}/activate':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /users/{id}/activate
+      operationId: post_users_id_activate
+      responses:
+        '201':
+          description: Successful response
+  '/users/{id}/archive':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /users/{id}/archive
+      operationId: post_users_id_archive
+      responses:
+        '201':
+          description: Successful response
+  '/users/{id}/permissions':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: GET /users/{id}/permissions
+      operationId: get_users_id_permissions
+      responses:
+        '200':
+          description: Successful response
+    put:
+      summary: PUT /users/{id}/permissions
+      operationId: put_users_id_permissions
+      responses:
+        '200':
+          description: Successful response
+  '/users/{id}/reset-password':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /users/{id}/reset-password
+      operationId: post_users_id_reset_password
+      responses:
+        '201':
+          description: Successful response
+  '/users/{id}/suspend':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /users/{id}/suspend
+      operationId: post_users_id_suspend
+      responses:
+        '201':
+          description: Successful response
+  '/users/{id}/unlock':
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: POST /users/{id}/unlock
+      operationId: post_users_id_unlock
+      responses:
+        '201':
+          description: Successful response

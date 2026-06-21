@@ -1,0 +1,77 @@
+# =============================================================================
+# docker-compose.test.yml — Test / staging overlay (Task 12.2, Requirement 9)
+#
+# PURPOSE
+#   Provide the backend's share of the cross-repo Requirement 9: a REAL,
+#   HTTPS-reachable backend target (Public_Endpoint) that the frontend repo's
+#   Contract_Test_Suite and E2E_Suite run against over HTTPS with NO mock
+#   (Req 9.1, 9.2). This overlay brings up the FULL stack INCLUDING the
+#   reverse-proxy that terminates TLS / serves HTTPS:
+#       reverse-proxy (Nginx, TLS) -> api (3000, internal) -> postgres + redis
+#
+# HOW IT COMPOSES
+#   This file is an OVERLAY on the production docker-compose.yml. It is NOT
+#   used standalone. Always combine the two files explicitly, and do NOT let
+#   docker-compose.override.yml (dev-only port re-exposure) load implicitly:
+#
+#     docker compose \
+#       -f docker-compose.yml \
+#       -f docker-compose.test.yml \
+#       up -d --build --wait
+#
+#   ("--wait" blocks until the reverse-proxy healthcheck below reports the
+#   HTTPS endpoint is answering, so the frontend suites can start immediately.)
+#
+# TEST TLS CERTIFICATES (self-signed — for test/staging only)
+#   The reverse-proxy expects, per docker-compose.yml + reverse-proxy/nginx.conf:
+#       /etc/nginx/certs/fullchain.pem
+#       /etc/nginx/certs/privkey.pem
+#   mounted from the host directory  ./reverse-proxy/certs.
+#   Generate a self-signed pair for testing (certs are git-ignored — never
+#   commit private keys):
+#
+#     mkdir -p reverse-proxy/certs
+#     openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+#       -keyout reverse-proxy/certs/privkey.pem \
+#       -out    reverse-proxy/certs/fullchain.pem \
+#       -subj   "/CN=localhost" \
+#       -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+#
+#   The Contract/E2E suites must trust this cert (e.g. NODE_EXTRA_CA_CERTS or
+#   "ignore TLS errors" in the test runner) since it is self-signed. In real
+#   staging, mount CA-issued certs into ./reverse-proxy/certs instead.
+#
+# ENVIRONMENT / SECRETS
+#   This overlay reuses the production .env (POSTGRES_*, REDIS_PASSWORD, JWT_*,
+#   etc.). Provide a test .env with STRONG secrets — the boot-time secret
+#   validation (Requirement 1) rejects weak values when NODE_ENV=production.
+#   Set CORS_ORIGIN to the origin the frontend suites run from.
+#
+# This file MUST NOT be used in real production deployments.
+# =============================================================================
+
+services:
+  reverse-proxy:
+    # The reverse-proxy is the Public_Endpoint. Add a healthcheck that proves
+    # the live backend answers over HTTPS end-to-end (TLS terminated here ->
+    # proxied to api:3000 -> /api/health). "-k" accepts the self-signed test
+    # cert. "docker compose up --wait" gates on this, so the frontend's
+    # Contract_Test_Suite / E2E_Suite only start once HTTPS is genuinely live.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget --no-check-certificate -q -O /dev/null https://localhost/api/health || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  api:
+    # Surface the public endpoint to the app so generated absolute URLs and
+    # health reporting match what the frontend suites target. Defaults assume
+    # the suites hit https://localhost. Override PUBLIC_ENDPOINT as needed.
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - PUBLIC_ENDPOINT=${PUBLIC_ENDPOINT:-https://localhost}

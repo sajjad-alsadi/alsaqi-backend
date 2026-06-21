@@ -1,0 +1,58 @@
+# Alertmanager configuration — production-launch-readiness (Requirements 13.3, 13.4, 13.5)
+# Component: design.md region (ي-13) — routes firing/resolved alerts to the
+# preconfigured notification channel (قناة الإشعار المُعدّة).
+#
+# send_resolved: true ensures a `resolved` notification is delivered once an
+# alert clears (after the recovery window implied by the rule's `for:`).  (13.5)
+
+global:
+  resolve_timeout: 5m
+
+# Default route — all alerts flow to the configured notification channel.
+route:
+  receiver: alsaqi-default-channel
+  group_by: ['alertname', 'component']
+  # Wait before sending the initial notification for a new group of alerts.
+  group_wait: 30s
+  # Wait before sending a notification about new alerts added to a group.
+  group_interval: 5m
+  # Wait before re-sending an already-fired notification.
+  repeat_interval: 4h
+  routes:
+    # Critical availability alerts (e.g. APIEndpointUnreachable) page faster.
+    - matchers:
+        - severity = critical
+      receiver: alsaqi-default-channel
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  # ─── Preconfigured notification channel (placeholder) ──────────────────────
+  # Replace the placeholder configuration below with the real channel for your
+  # deployment (Slack, email, PagerDuty, generic webhook, etc.). The key point
+  # for Requirement 13.5 is `send_resolved: true` on every notifier so recovery
+  # ("resolved") notifications are delivered.
+  - name: alsaqi-default-channel
+    # --- Option A: Slack ---
+    # slack_configs:
+    #   - api_url: https://hooks.slack.com/services/XXXX/YYYY/ZZZZ   # CONFIGURE
+    #     channel: '#alerts'
+    #     send_resolved: true
+    #
+    # --- Option B: Email ---
+    # email_configs:
+    #   - to: oncall@example.com                                     # CONFIGURE
+    #     from: alertmanager@example.com
+    #     smarthost: smtp.example.com:587
+    #     auth_username: alertmanager@example.com
+    #     auth_password: CONFIGURE
+    #     send_resolved: true
+    #
+    # --- Option C: Generic webhook (active placeholder) ---
+    webhook_configs:
+      - url: http://notification-channel:9094/alerts   # CONFIGURE: real channel URL
+        send_resolved: true
+
+# Inhibition rules can be added here to suppress lower-severity alerts when a
+# related critical alert is already firing.
+inhibit_rules: []

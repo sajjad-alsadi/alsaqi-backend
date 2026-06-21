@@ -1,14 +1,46 @@
 # docker-compose.yml - Production orchestration
-# Application exposes port 3000; PostgreSQL and Redis are internal-only (no host ports)
+# The reverse-proxy (Nginx) is the ONLY public entrypoint (ports 80/443).
+# The api application port (3000) is NOT published to the host/public network;
+# it is reachable only on the internal alsaqi-network via `expose` (Req 4.5).
+# PostgreSQL and Redis are internal-only (no host ports).
 # Services communicate via the alsaqi-network bridge network, environment variables via .env file
 
 services:
+  # ---------------------------------------------------------------------------
+  # Reverse_Proxy (Nginx) — TLS termination + the only public entrypoint (Req 4)
+  # Config authored in reverse-proxy/nginx.conf (task 8.1). It proxies to the
+  # internal "api" service on port 3000 over the alsaqi-network.
+  # ---------------------------------------------------------------------------
+  reverse-proxy:
+    image: nginx:1.27-alpine
+    container_name: alsaqi-reverse-proxy
+    # Public entrypoint: this is the ONLY service that publishes host ports.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Mount the reverse-proxy configuration read-only.
+      - ./reverse-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+      # TLS certificate material expected at /etc/nginx/certs/{fullchain.pem,privkey.pem}.
+      # Provide REAL certificates here (e.g. issued by your CA / certbot) before
+      # going to production. Replace ./reverse-proxy/certs with your cert directory;
+      # never commit private keys to the repository.
+      - ./reverse-proxy/certs:/etc/nginx/certs:ro
+    depends_on:
+      - api
+    networks:
+      - alsaqi-network
+    restart: unless-stopped
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
+    # The application port is NOT published to the host/public network.
+    # It is exposed only on the internal alsaqi-network so the reverse-proxy
+    # can reach it; external clients must go through the reverse-proxy (Req 4.5).
+    expose:
+      - "3000"
     env_file:
       - .env
     environment:
@@ -26,7 +58,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          cpus: "2.0"
+          memory: 2048M
 
   postgres:
     image: postgres:15
@@ -42,6 +75,11 @@ services:
     networks:
       - alsaqi-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required} -d ${POSTGRES_DB:?POSTGRES_DB is required}"]
       interval: 10s
@@ -60,6 +98,11 @@ services:
     networks:
       - alsaqi-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
     healthcheck:
       test: ["CMD", "redis-cli", "--no-auth-warning", "ping"]
       interval: 10s

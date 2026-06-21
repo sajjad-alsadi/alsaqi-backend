@@ -1,0 +1,15 @@
+# Grafana datasource provisioning — production-launch-readiness (Requirement 13.2)
+# Wires the Prometheus instance as the default datasource used by the dashboards.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Internal compose network address of the Prometheus service.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      # Keep scrape/refresh alignment with prometheus.yml (15s scrape_interval).
+      timeInterval: 15s

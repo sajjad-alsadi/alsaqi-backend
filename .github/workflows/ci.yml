@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main, master]
 
@@ -34,6 +36,68 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # ─── Deterministic launch gates (fail-closed: non-zero exit on failure or
+      #     on inability to evaluate). Spec: production-launch-readiness task 13.1.
+      #     Requirements 2.1, 2.4, 6.5, 8.4, 8.5, 10.4. ────────────────────────────
+
+      - name: 'Gate: Env_Template consistency'
+        run: npx tsx scripts/ci/checkEnvTemplate.ts
+
+      - name: 'Gate: Route↔permission authorization gaps'
+        run: npx tsx scripts/ci/checkRoutePermissions.ts
+
+      - name: 'Gate: Shared_Package surface fingerprint'
+        # Cross-repo (B1): the frontend CI computes the SAME fingerprint and
+        # compares it against the committed baseline (packages/shared/surface.fingerprint).
+        # Any drift in either repo, or inability to compute, fails the build.
+        run: npx tsx scripts/ci/checkSharedFingerprint.ts
+
+      - name: 'Gate: OpenAPI ↔ route equivalence'
+        run: npx tsx scripts/ci/checkOpenApiEquivalence.ts
+
+      # ─── Cross-repo gates (B5/B6): permission parity + path-conditional contract.
+      #     Spec: production-launch-readiness task 22.1.
+      #     Requirements 17.4, 18.1, 18.2, 18.3, 18.4.
+      #
+      #     Cross-repo split: Frontend_Permission_Registry and the actual
+      #     Contract_Test_Suite live in the FRONTEND repo. The backend enforces its
+      #     share of BOTH gates here; the frontend repo runs the equivalent gates so
+      #     parity and the contract policy are enforced in lock-step (B5/B6). ───────
+
+      - name: 'Gate: Permission registry parity (B5)'
+        # Builds the backend Permission_Registry and compares it against the
+        # Frontend_Permission_Registry artifact (committed mirror at
+        # packages/shared/frontend.permissions.json by default; override via
+        # FRONTEND_PERMISSION_REGISTRY_PATH to consume the frontend-published
+        # artifact). Exits non-zero on ANY parity gap, naming the module/permission
+        # and the registry it is missing from. Fails closed if the frontend
+        # registry input is unavailable/unparseable. (Requirement 17.4)
+        run: npx tsx scripts/ci/checkPermissionParity.ts
+
+      # Detect whether this PR modifies any Shared_Package file (packages/shared/**,
+      # including endpoint contracts). Drives the path-conditional contract gate.
+      - name: 'Detect Shared_Package changes'
+        id: shared_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            shared:
+              - 'packages/shared/**'
+
+      - name: 'Gate: Contract test suite (path-conditional, B6)'
+        # When packages/shared/** is modified, the Contract_Test_Suite is REQUIRED
+        # and this gate fails closed unless the frontend suite (B6) reports a
+        # successful completion via CONTRACT_SUITE_STATUS (failure / timeout /
+        # cancel / error / missing ⇒ merge blocked, 18.1/18.2/18.4). When no
+        # Shared_Package file is modified, the suite is NOT required and this gate
+        # is a no-op so the other configured checks decide merge eligibility (18.3).
+        env:
+          SHARED_PACKAGE_CHANGED: ${{ steps.shared_changes.outputs.shared }}
+          # Propagated from the frontend Contract_Test_Suite run (B6) for this
+          # change set (e.g. via commit status / check run / repository_dispatch).
+          CONTRACT_SUITE_STATUS: ${{ vars.CONTRACT_SUITE_STATUS }}
+        run: npx tsx scripts/ci/checkContractGate.ts
 
       - name: Security audit
         run: |

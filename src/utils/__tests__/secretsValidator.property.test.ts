@@ -51,7 +51,6 @@ function createValidBaseEnv(): Record<string, string> {
     JWT_SECRET: 'x'.repeat(64),
     VITE_STORAGE_SECRET: 'y'.repeat(32),
     VITE_NETWORK_SECRET: 'a-strong-unique-network-secret-value',
-    DATABASE_URL: 'postgresql://user:pass@localhost:5432/alsaqi',
   };
 }
 
@@ -79,7 +78,7 @@ describe('Property 3: Secret Strength Validation', () => {
           const result = validateProductionSecrets(env);
 
           expect(result.isValid).toBe(false);
-          expect(result.errors.some((e) => e.includes('JWT_SECRET'))).toBe(true);
+          expect(result.failures.some((f) => f.variable === 'JWT_SECRET')).toBe(true);
         }
       ),
       { numRuns: 100 }
@@ -97,7 +96,7 @@ describe('Property 3: Secret Strength Validation', () => {
           const result = validateProductionSecrets(env);
 
           expect(result.isValid).toBe(false);
-          expect(result.errors.some((e) => e.includes('VITE_STORAGE_SECRET'))).toBe(true);
+          expect(result.failures.some((f) => f.variable === 'VITE_STORAGE_SECRET')).toBe(true);
         }
       ),
       { numRuns: 100 }
@@ -115,7 +114,7 @@ describe('Property 3: Secret Strength Validation', () => {
           const result = validateProductionSecrets(env);
 
           expect(result.isValid).toBe(false);
-          expect(result.errors.some((e) => e.includes('VITE_NETWORK_SECRET'))).toBe(true);
+          expect(result.failures.some((f) => f.variable === 'VITE_NETWORK_SECRET')).toBe(true);
         }
       ),
       { numRuns: 100 }
@@ -133,7 +132,7 @@ describe('Property 3: Secret Strength Validation', () => {
           const result = validateProductionSecrets(env);
 
           expect(result.isValid).toBe(false);
-          expect(result.errors.some((e) => e.includes('JWT_SECRET'))).toBe(true);
+          expect(result.failures.some((f) => f.variable === 'JWT_SECRET')).toBe(true);
         }
       ),
       { numRuns: 100 }
@@ -151,7 +150,7 @@ describe('Property 3: Secret Strength Validation', () => {
           const result = validateProductionSecrets(env);
 
           expect(result.isValid).toBe(false);
-          expect(result.errors.some((e) => e.includes('VITE_STORAGE_SECRET'))).toBe(true);
+          expect(result.failures.some((f) => f.variable === 'VITE_STORAGE_SECRET')).toBe(true);
         }
       ),
       { numRuns: 100 }

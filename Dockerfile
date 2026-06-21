@@ -1,5 +1,8 @@
 # ─── Stage 1: Build ─────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+# Base images are pinned to an immutable content digest for reproducible,
+# tamper-resistant builds (Requirement 20.1). The human-readable tag is kept in
+# a trailing comment. Update both the digest and the comment together when bumping.
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder  # node:20-alpine
 
 WORKDIR /app
 
@@ -22,7 +25,8 @@ RUN npm run build
 
 # ─── Stage 2: Production ────────────────────────────────────────────────────
 # Pin to specific minor version for reproducible builds. Update periodically.
-FROM node:20.19-slim AS production
+# Pinned to an immutable content digest (Requirement 20.1); tag kept in comment.
+FROM node:20.19-slim@sha256:b342de02eb4a57cd6986290a69833d20818508db8078dba0197a024193410aee AS production  # node:20.19-slim
 
 WORKDIR /app
 

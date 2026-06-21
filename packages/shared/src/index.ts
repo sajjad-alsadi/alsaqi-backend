@@ -12,3 +12,6 @@ export * from './validators';
 
 // Constants (Error codes, module names, API version)
 export * from './constants';
+
+// Public surface fingerprint (deterministic SHA-256 over the canonicalized public surface)
+export { computeSharedSurfaceFingerprint } from './fingerprint';

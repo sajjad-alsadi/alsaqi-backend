@@ -22,6 +22,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -32,9 +37,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract short commit SHA
+      - name: Extract build metadata
         id: vars
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build Docker image
         uses: docker/build-push-action@v5
@@ -48,14 +55,80 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Scan the built image for HIGH/CRITICAL vulnerabilities BEFORE pushing
+      # (Req 20.2). We emit JSON and DO NOT fail here (exit-code 0); the
+      # fail-closed decision is made by the dedicated gate step below so that we
+      # can still record the scan summary in the build artifact manifest.
+      # continue-on-error ensures that even if Trivy itself cannot run (tool
+      # failure / vuln DB unreachable), we proceed to the gate which fails
+      # closed on a missing/invalid results file (Req 20.4).
       - name: Scan image with Trivy
+        id: trivy
+        continue-on-error: true
         uses: aquasecurity/trivy-action@0.21.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.short_sha }}
-          format: 'table'
-          exit-code: '1'
+          format: 'json'
+          exit-code: '0'
           severity: 'HIGH,CRITICAL'
-          output: 'trivy-results.txt'
+          output: 'trivy-results.json'
+
+      # Evaluate the scan output WITHOUT failing. Determines whether the scan
+      # completed (valid JSON results present) and counts HIGH/CRITICAL findings.
+      # These outputs feed both the manifest and the fail-closed gate.
+      - name: Evaluate Trivy scan results
+        id: scan
+        run: |
+          set -uo pipefail
+          if [ ! -s trivy-results.json ] || ! jq -e . trivy-results.json >/dev/null 2>&1; then
+            echo "scan_completed=false" >> "$GITHUB_OUTPUT"
+            echo "high_count=0" >> "$GITHUB_OUTPUT"
+            echo "critical_count=0" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Trivy scan did not complete (results file missing or invalid)."
+            exit 0
+          fi
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
+          CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+          echo "scan_completed=true" >> "$GITHUB_OUTPUT"
+          echo "high_count=$HIGH" >> "$GITHUB_OUTPUT"
+          echo "critical_count=$CRIT" >> "$GITHUB_OUTPUT"
+          echo "Trivy scan completed: HIGH=$HIGH CRITICAL=$CRIT"
+
+      # Resolve the content digest pinned for each base image (every FROM in the
+      # Dockerfile), producing a JSON array of { ref, resolvedDigest } (Req 20.5).
+      - name: Resolve base image digests
+        id: images
+        run: |
+          set -euo pipefail
+          IMAGES_JSON=$(grep -E '^FROM ' Dockerfile \
+            | sed -E 's/^FROM[[:space:]]+([^[:space:]]+).*/\1/' \
+            | jq -R -s -c 'split("\n")
+                | map(select(length > 0))
+                | map((. / "@") as $p | { ref: $p[0], resolvedDigest: ($p[1] // "") })')
+          echo "images_json=$IMAGES_JSON" >> "$GITHUB_OUTPUT"
+          echo "Resolved base images: $IMAGES_JSON"
+
+      # Produce the BuildArtifactManifest via the pure generator (Req 20.5).
+      # Runs even when the scan failed so the manifest records completed=false.
+      - name: Generate build artifact manifest
+        if: always()
+        env:
+          BUILT_AT: ${{ steps.vars.outputs.built_at }}
+          MANIFEST_IMAGES: ${{ steps.images.outputs.images_json }}
+          SCAN_TOOL: trivy
+          SCAN_HIGH_COUNT: ${{ steps.scan.outputs.high_count }}
+          SCAN_CRITICAL_COUNT: ${{ steps.scan.outputs.critical_count }}
+          SCAN_COMPLETED: ${{ steps.scan.outputs.scan_completed }}
+          MANIFEST_OUTPUT: build-artifact-manifest.json
+        run: npx -y tsx@4 scripts/buildArtifactManifest.ts
+
+      - name: Upload build artifact manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifact-manifest
+          path: build-artifact-manifest.json
+          if-no-files-found: warn
 
       - name: Display Trivy scan results
         if: always()
@@ -63,19 +136,29 @@ jobs:
           echo "=========================================="
           echo "🔍 Trivy Container Vulnerability Scan"
           echo "=========================================="
-          if [ -f trivy-results.txt ]; then
-            cat trivy-results.txt
+          if [ -f trivy-results.json ]; then
+            jq '.' trivy-results.json || cat trivy-results.json
           else
             echo "No Trivy output file found."
           fi
 
-      - name: Fail if vulnerabilities found
-        if: failure()
+      # Fail-closed gate (Req 20.3 + 20.4): block the push when the scan could
+      # not complete OR when any HIGH/CRITICAL vulnerability was reported.
+      - name: Enforce vulnerability gate (fail-closed)
         run: |
-          echo ""
-          echo "❌ HIGH or CRITICAL vulnerabilities detected in the Docker image."
-          echo "Please review the Trivy scan results above and fix the vulnerabilities before merging."
-          exit 1
+          set -euo pipefail
+          if [ "${{ steps.scan.outputs.scan_completed }}" != "true" ]; then
+            echo "❌ Image scan could not be completed. Failing closed: the image will NOT be pushed."
+            exit 1
+          fi
+          HIGH="${{ steps.scan.outputs.high_count }}"
+          CRIT="${{ steps.scan.outputs.critical_count }}"
+          if [ "$HIGH" -gt 0 ] || [ "$CRIT" -gt 0 ]; then
+            echo "❌ HIGH ($HIGH) or CRITICAL ($CRIT) vulnerabilities detected. The image will NOT be pushed."
+            echo "Review the Trivy scan results above and fix the vulnerabilities before merging."
+            exit 1
+          fi
+          echo "✅ No HIGH/CRITICAL vulnerabilities and scan completed. Proceeding to push."
 
       - name: Push Docker image
         uses: docker/build-push-action@v5

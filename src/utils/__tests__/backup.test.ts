@@ -20,6 +20,28 @@ vi.mock('node-cron', () => ({
 }));
 
 // Mock fs
+const makeWritableStream = () => {
+  const handlers: Record<string, Function[]> = {};
+  const stream: any = {
+    write: vi.fn(),
+    end: vi.fn((cb?: Function) => { if (typeof cb === 'function') setImmediate(() => cb()); }),
+    destroy: vi.fn(),
+    on: (event: string, cb: Function) => {
+      (handlers[event] ||= []).push(cb);
+      if (event === 'finish') setImmediate(() => cb());
+      return stream;
+    },
+  };
+  return stream;
+};
+const makeReadableStream = () => {
+  const stream: any = {
+    pipe: vi.fn((dest: any) => dest),
+    on: vi.fn(() => stream),
+    destroy: vi.fn(),
+  };
+  return stream;
+};
 vi.mock('fs', () => ({
   default: {
     existsSync: vi.fn().mockReturnValue(true),
@@ -29,6 +51,8 @@ vi.mock('fs', () => ({
     unlinkSync: vi.fn(),
     rmSync: vi.fn(),
     readdirSync: vi.fn().mockReturnValue([]),
+    createReadStream: vi.fn(() => makeReadableStream()),
+    createWriteStream: vi.fn(() => makeWritableStream()),
   },
   existsSync: vi.fn().mockReturnValue(true),
   mkdirSync: vi.fn(),
@@ -37,12 +61,35 @@ vi.mock('fs', () => ({
   unlinkSync: vi.fn(),
   rmSync: vi.fn(),
   readdirSync: vi.fn().mockReturnValue([]),
+  createReadStream: vi.fn(() => makeReadableStream()),
+  createWriteStream: vi.fn(() => makeWritableStream()),
 }));
 
 // Mock child_process
-vi.mock('child_process', () => ({
-  exec: vi.fn((cmd: string, cb: Function) => cb(null, '', '')),
-}));
+vi.mock('child_process', () => {
+  const makeFakeProcess = () => {
+    const handlers: Record<string, Function[]> = {};
+    const proc: any = {
+      stdout: { pipe: vi.fn(), on: vi.fn() },
+      stderr: { on: vi.fn() },
+      stdin: {},
+      kill: vi.fn(),
+      on: (event: string, cb: Function) => {
+        (handlers[event] ||= []).push(cb);
+        // Simulate a successful, immediate completion for `close`.
+        if (event === 'close') {
+          setImmediate(() => cb(0));
+        }
+        return proc;
+      },
+    };
+    return proc;
+  };
+  return {
+    exec: vi.fn((cmd: string, cb: Function) => cb(null, '', '')),
+    spawn: vi.fn(() => makeFakeProcess()),
+  };
+});
 
 // Mock the db module
 const mockPrepare = vi.fn();
@@ -87,6 +134,7 @@ vi.mock('../../../constants', () => ({
 }));
 
 import { BackupScheduler } from '../backup';
+import { __testing } from '../backup';
 import fs from 'fs';
 
 describe('BackupScheduler', () => {
@@ -426,5 +474,176 @@ describe('BackupScheduler', () => {
       expect(result.errors).toBeDefined();
       expect(result.errors!.length).toBeGreaterThan(0);
     });
+  });
+});
+
+// --- Offsite_Store copy + failure marking (Req 3.2, 3.4, 3.7) ---
+
+describe('Offsite_Store (Req 3.2, 3.7)', () => {
+  const ORIGINAL_ENV = { ...process.env };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Reset env between tests
+    delete process.env.OFFSITE_S3_BUCKET;
+    delete process.env.OFFSITE_BACKUP_DIR;
+    delete process.env.OFFSITE_S3_PREFIX;
+    delete process.env.OFFSITE_S3_ENDPOINT;
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  describe('getOffsiteConfig()', () => {
+    it('returns null transports when nothing is configured', () => {
+      const cfg = __testing.getOffsiteConfig();
+      expect(cfg.s3Bucket).toBeNull();
+      expect(cfg.dir).toBeNull();
+    });
+
+    it('reads OFFSITE_S3_BUCKET and OFFSITE_BACKUP_DIR from env', () => {
+      process.env.OFFSITE_S3_BUCKET = 'my-bucket';
+      process.env.OFFSITE_BACKUP_DIR = '/mnt/offsite';
+      const cfg = __testing.getOffsiteConfig();
+      expect(cfg.s3Bucket).toBe('my-bucket');
+      expect(cfg.dir).toBe('/mnt/offsite');
+    });
+  });
+
+  describe('copyToOffsiteStore()', () => {
+    it('returns null when no Offsite_Store is configured (dev mode)', async () => {
+      const location = await __testing.copyToOffsiteStore('/backups/backup.tar.gz.enc');
+      expect(location).toBeNull();
+    });
+
+    it('copies to a filesystem Offsite_Store directory and returns its path', async () => {
+      process.env.OFFSITE_BACKUP_DIR = '/mnt/offsite';
+
+      const location = await __testing.copyToOffsiteStore('/backups/backup_x.tar.gz.enc');
+
+      expect(fs.createReadStream).toHaveBeenCalledWith('/backups/backup_x.tar.gz.enc');
+      // Destination uses the same file name within the offsite directory.
+      expect(location).toContain('backup_x.tar.gz.enc');
+      expect(fs.createWriteStream).toHaveBeenCalled();
+    });
+
+    it('propagates a directory-copy failure so the cycle can be marked failed (Req 3.7)', async () => {
+      process.env.OFFSITE_BACKUP_DIR = '/mnt/offsite';
+      // Force the write stream to emit an error.
+      (fs.createWriteStream as any).mockImplementationOnce(() => {
+        const handlers: Record<string, Function[]> = {};
+        const stream: any = {
+          write: vi.fn(),
+          end: vi.fn(),
+          destroy: vi.fn(),
+          on: (event: string, cb: Function) => {
+            (handlers[event] ||= []).push(cb);
+            if (event === 'error') setImmediate(() => cb(new Error('offsite disk full')));
+            return stream;
+          },
+        };
+        return stream;
+      });
+
+      await expect(
+        __testing.copyToOffsiteStore('/backups/backup_y.tar.gz.enc')
+      ).rejects.toThrow('offsite disk full');
+    });
+  });
+});
+
+describe('Backup cycle verified flag (Req 3.4, 3.7)', () => {
+  let scheduler: BackupScheduler;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAll.mockResolvedValue([]);
+    mockRun.mockResolvedValue({ changes: 1 });
+    mockGet.mockResolvedValue(undefined);
+    delete process.env.OFFSITE_S3_BUCKET;
+    delete process.env.OFFSITE_BACKUP_DIR;
+    scheduler = new BackupScheduler();
+  });
+
+  afterEach(() => {
+    scheduler.stop();
+  });
+
+  it('marks a failed cycle as NOT verified (verified=false)', async () => {
+    // Make table backup throw so the cycle fails.
+    mockAll.mockImplementation((...args: any[]) => {
+      const lastPrepareCall = mockPrepare.mock.calls[mockPrepare.mock.calls.length - 1];
+      if (lastPrepareCall && lastPrepareCall[0]?.includes('SELECT *')) {
+        return Promise.reject(new Error('Database connection lost'));
+      }
+      return Promise.resolve([]);
+    });
+
+    const result = await scheduler.runNow();
+
+    expect(result.status).toBe('failed');
+    expect(result.verified).toBe(false);
+
+    // The persisted record must not be marked verified either.
+    const verifiedArgs = mockRun.mock.calls.find((args: any[]) =>
+      args.some((a: any) => a === false || a === true)
+    );
+    expect(verifiedArgs).toBeDefined();
+  });
+
+  it('marks the cycle failed and not verified when the offsite copy fails (Req 3.7)', async () => {
+    process.env.OFFSITE_BACKUP_DIR = '/mnt/offsite';
+    // Successful table backup, but offsite write stream errors out.
+    (fs.createWriteStream as any).mockImplementation(() => {
+      const handlers: Record<string, Function[]> = {};
+      const stream: any = {
+        write: vi.fn(),
+        end: vi.fn(),
+        destroy: vi.fn(),
+        on: (event: string, cb: Function) => {
+          (handlers[event] ||= []).push(cb);
+          if (event === 'error') setImmediate(() => cb(new Error('offsite unreachable')));
+          return stream;
+        },
+      };
+      return stream;
+    });
+
+    const result = await scheduler.runNow();
+
+    expect(result.status).toBe('failed');
+    expect(result.verified).toBe(false);
+    expect(result.offsiteLocation).toBeNull();
+    expect(result.errors!.some(e => e.includes('offsite unreachable'))).toBe(true);
+  });
+
+  it('exposes offsiteLocation as null when no Offsite_Store is configured', async () => {
+    const result = await scheduler.runNow();
+    expect(result.offsiteLocation).toBeNull();
+  });
+
+  it('marks the cycle failed and not verified when at-rest encryption fails (Req 3.4)', async () => {
+    // Configure an encryption key so the cycle takes the encrypt-at-rest path
+    // (encryptFileAtRest) instead of retaining the archive unencrypted.
+    process.env.FILE_ENCRYPTION_KEY = 'test-encryption-key-material-1234567890';
+    // The first createReadStream of the cycle is the source opened inside
+    // encryptFileAtRest (the PGlite dump path and tar archiving use writeFileSync
+    // and spawn, not createReadStream). Force it to throw so the encryption step
+    // fails mid-cycle and the failure propagates to the cycle result.
+    (fs.createReadStream as any).mockImplementationOnce(() => {
+      throw new Error('cipher read failed');
+    });
+
+    try {
+      const result = await scheduler.runNow();
+
+      // Encryption failure (Req 3.4) ⇒ failed cycle that is never verified.
+      expect(result.status).toBe('failed');
+      expect(result.verified).toBe(false);
+      expect(result.errors!.some(e => e.includes('cipher read failed'))).toBe(true);
+    } finally {
+      delete process.env.FILE_ENCRYPTION_KEY;
+    }
   });
 });

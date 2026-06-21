@@ -1,0 +1,141 @@
+# vector.toml — Log Shipper for alsaqi-backend
+# production-launch-readiness · design.md region (ي-14) · Requirements 14.1, 14.2
+#
+# Role: collect logs emitted by API_Container and ship them to the central
+# Log_Aggregator (Loki) reliably. The two reliability guarantees encoded here are:
+#
+#   Req 14.1 — Collect each API_Container log entry within 60s of emission.
+#              => `docker_logs` tails the running container continuously and the
+#                 primary sink flushes on a batch timeout far below 60s (5s).
+#
+#   Req 14.2 — On a failure to ship/store an entry: retry up to 3 times; if it
+#              still fails, BUFFER the entry (never drop it) and raise an alert.
+#              => primary sink uses request.retry_attempts = 3, a disk buffer with
+#                 when_full = "block" (back-pressure instead of dropping), and the
+#                 internal-metrics pipeline below exposes failure/buffer signals
+#                 that Alertmanager fires on (the "trigger alert" obligation).
+#
+# Run as a sidecar/daemon next to API_Container with the docker socket mounted
+# read-only and a persistent volume mounted at VECTOR_DATA_DIR.
+
+# Persistent on-disk location for Vector's disk buffers and checkpoints.
+# Must be a durable volume so buffered logs survive restarts (Req 14.2: never drop).
+data_dir = "/var/lib/vector"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCES
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Tail logs straight off the Docker engine for the API_Container.
+# Continuous tailing + the 5s sink batch timeout (below) satisfies the
+# "collect within 60s" guarantee of Req 14.1.
+[sources.api_container]
+type = "docker_logs"
+# Only collect from the API service container. Adjust the label/name to match
+# how the api service is named/labelled in docker-compose (service: api).
+include_containers = ["alsaqi-api"]
+include_labels = ["com.docker.compose.service=api"]
+# Read the full backlog on first start so nothing emitted before Vector was
+# ready is lost.
+auto_partial_merge = true
+
+# Vector's own health/throughput counters. These power the alerting obligation
+# of Req 14.2: when the primary sink exhausts its retries or its disk buffer
+# fills, the corresponding counters/gauges move and Alertmanager fires.
+[sources.vector_internal_metrics]
+type = "internal_metrics"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRANSFORMS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The API logs structured JSON on stdout. Parse it so fields such as `traceId`,
+# `level`, and `timestamp` become first-class and queryable in the aggregator
+# (supports the range + traceId query path in Req 14.5). If a line is not valid
+# JSON we keep the raw message rather than dropping the event (Req 14.2: no drops).
+[transforms.parse_json]
+type = "remap"
+inputs = ["api_container"]
+source = '''
+structured, err = parse_json(.message)
+if err == null {
+    . = merge(., object!(structured))
+}
+# Normalise a correlation id for log queries; fall back to "unknown" so the
+# field always exists rather than being absent.
+.traceId = .traceId || .trace_id || "unknown"
+.service = "alsaqi-api"
+'''
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SINKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Primary sink → central Log_Aggregator (Loki).
+# This sink carries the Req 14.2 reliability contract: retry then buffer, no drops.
+[sinks.loki]
+type = "loki"
+inputs = ["parse_json"]
+endpoint = "${LOKI_ENDPOINT:-http://loki:3100}"
+encoding.codec = "json"
+
+# Labels Loki indexes on. Keep cardinality low; traceId stays in the log body.
+[sinks.loki.labels]
+service = "alsaqi-api"
+component = "API_Container"
+level = "{{ level }}"
+
+# Req 14.1: flush at least every 5s (well under the 60s collection budget) so a
+# log emitted by API_Container reaches the aggregator promptly.
+[sinks.loki.batch]
+timeout_secs = 5
+max_events = 1000
+
+# Req 14.2 (retry up to 3 times): attempt delivery, then 3 retries on failure.
+# After retries are exhausted the events are NOT dropped — they accumulate in the
+# disk buffer below until Loki recovers.
+[sinks.loki.request]
+retry_attempts = 3
+retry_initial_backoff_secs = 1
+retry_max_duration_secs = 30
+timeout_secs = 30
+
+# Req 14.2 (buffer without dropping): a DURABLE on-disk buffer. when_full =
+# "block" applies back-pressure to the source instead of discarding events, so
+# logs are never dropped even during a prolonged Loki outage. Sized large enough
+# to absorb a meaningful outage; raise max_size for longer expected downtimes.
+[sinks.loki.buffer]
+type = "disk"
+max_size = 1073741824   # 1 GiB of on-disk buffer
+when_full = "block"     # back-pressure, never drop (Req 14.2)
+
+# Dead-letter mirror → durable local file.
+# Independent safety net: a copy of every shipped event is written to a local
+# rotating file with its own blocking disk buffer. If the central aggregator is
+# unreachable for longer than the Loki buffer can hold, operators still have a
+# complete on-host record to replay — reinforcing the "never drop" guarantee.
+[sinks.dead_letter_file]
+type = "file"
+inputs = ["parse_json"]
+path = "/var/lib/vector/dead-letter/api-%Y-%m-%d.log"
+encoding.codec = "json"
+
+[sinks.dead_letter_file.buffer]
+type = "disk"
+max_size = 268435456    # 256 MiB
+when_full = "block"     # never drop
+
+# Alert sink → Prometheus exporter for Alertmanager (Req 14.2: "trigger alert").
+# Vector exposes its internal metrics here (e.g. component_errors_total,
+# buffer_events / buffer_byte_size, component_discarded_events_total). Prometheus
+# scrapes this exporter and Alertmanager raises an alert when the loki sink
+# exhausts retries or its disk buffer keeps growing — i.e. shipping is failing.
+# Companion alert rules belong alongside monitoring/alert.rules.yml, for example:
+#   - alert: LogShipperDeliveryFailing
+#     expr: rate(vector_component_errors_total{component_id="loki"}[5m]) > 0
+#   - alert: LogShipperBufferBackingUp
+#     expr: vector_buffer_events{component_id="loki"} > 0
+[sinks.vector_alerts]
+type = "prometheus_exporter"
+inputs = ["vector_internal_metrics"]
+address = "0.0.0.0:9598"

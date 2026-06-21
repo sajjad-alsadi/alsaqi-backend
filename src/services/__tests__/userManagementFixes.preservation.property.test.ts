@@ -334,8 +334,17 @@ describe('Property 11: Preservation — non-buggy inputs unchanged (user-managem
             };
           }
           if (sql.includes('failed_login_threshold')) return { failed_login_threshold: threshold };
+          // Conditional unlocked->locked transition UPDATE (`SET locked_until ... RETURNING id`)
+          // run via `.get()`: returns the row for the request that performs the transition, which
+          // drives the single admin-notification pass.
+          if (method === 'get' && sql.includes('SET locked_until') && sql.includes('RETURNING id')) {
+            return { id: 'u-lock' };
+          }
           if (sql.includes('SELECT id FROM users') && sql.includes('role')) return admins;
-          if (method === 'run' && /INSERT INTO notifications/.test(sql)) notifications++;
+          // Production inserts notifications with a single set-based `INSERT ... SELECT id FROM
+          // users WHERE role = ? AND status = 'Active'` → one row per active admin in one
+          // statement. Model that row count.
+          if (method === 'run' && /INSERT INTO notifications/.test(sql)) notifications += admins.length;
           return undefined;
         });
         verifyPasswordMock.mockResolvedValue(false); // wrong password
@@ -344,7 +353,8 @@ describe('Property 11: Preservation — non-buggy inputs unchanged (user-managem
           AuthService.login('victim', 'wrong', 'secret', 'PRIVATE_KEY', '203.0.113.9'),
         ).rejects.toBeInstanceOf(InvalidCredentialsError);
 
-        const locked = runSqls().some((s) => /locked_until\s*=\s*\?/.test(s));
+        // The lockout transition UPDATE (run via `.get()` with RETURNING) is in the full log.
+        const locked = dbState.log.some((e) => /SET locked_until/.test(e.sql));
         expect(locked, 'account is locked at the threshold').toBe(true);
         expect(notifications, 'one notification per active admin').toBe(activeAdmins);
       }),

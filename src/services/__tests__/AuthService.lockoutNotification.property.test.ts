@@ -62,10 +62,18 @@ vi.mock('../../db/index', () => {
     isExternal: false,
     prepare(sql: string) {
       return {
-        get: async (..._args: unknown[]) => {
+        get: async (...args: unknown[]) => {
           if (sql.includes('FROM users') && sql.includes('LOWER(username)')) return config.user;
           if (sql.includes('user_management_settings'))
             return { failed_login_threshold: config.threshold };
+          // Conditional unlocked->locked transition UPDATE (`SET locked_until ... RETURNING id`),
+          // executed via `.get()` OUTSIDE any transaction, so it auto-commits the lockout state
+          // and returns the row for the request that performed the transition (drives the single
+          // notification pass).
+          if (sql.includes('SET locked_until') && sql.includes('RETURNING id')) {
+            record({ kind: 'lockout', row: { lockedUntil: args[0], id: (config.user as { id: unknown }).id } });
+            return { id: (config.user as { id: unknown }).id };
+          }
           return undefined;
         },
         all: async (..._args: unknown[]) => {
@@ -86,11 +94,17 @@ vi.mock('../../db/index', () => {
             return {};
           }
           if (sql.includes('INSERT INTO notifications')) {
+            // Production uses a SINGLE set-based `INSERT ... SELECT` that inserts one row per
+            // active admin atomically. Model that single statement: it either inserts all rows
+            // (one per admin) or, on simulated failure, throws so the wrapping transaction rolls
+            // every staged row back.
             dbState.insertAttempts += 1;
-            if (config.failAtInsert > 0 && dbState.insertAttempts === config.failAtInsert) {
+            if (config.failAtInsert > 0) {
               throw new Error('simulated notification insert failure');
             }
-            record({ kind: 'notification', row: { userId: args[0] } });
+            for (const admin of config.admins) {
+              record({ kind: 'notification', row: { userId: admin.id } });
+            }
             return {};
           }
           return {};

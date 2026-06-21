@@ -241,8 +241,8 @@ describe('validateEnvironment', () => {
 
       const dbError = result.errors.find(e => e.variable === 'DATABASE_URL');
       expect(dbError).toBeDefined();
-      // Should show only first 4 chars + mask for sensitive vars
-      expect(dbError!.receivedValue).toContain('****');
+      // Sensitive vars are fully masked — no portion of the value is exposed
+      expect(dbError!.receivedValue).toBe('****');
       expect(dbError!.receivedValue).not.toContain('password');
     });
   });

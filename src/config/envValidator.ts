@@ -472,10 +472,9 @@ function sanitizeValue(value: string, varName: string): string {
   ];
 
   if (sensitiveVars.includes(varName)) {
-    if (value.length <= 4) {
-      return '****';
-    }
-    return value.substring(0, 4) + '****';
+    // Fully mask sensitive values — never leak any portion of a secret,
+    // not even a prefix, since a leaked prefix can aid brute-force/guessing.
+    return '****';
   }
 
   // For non-sensitive vars, show the full value (it helps debugging)

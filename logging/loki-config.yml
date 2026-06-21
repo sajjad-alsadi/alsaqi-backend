@@ -1,0 +1,135 @@
+# loki-config.yml — Log_Aggregator (Loki) for alsaqi-backend
+# production-launch-readiness · design.md region (ي-14) · Requirements 14.3, 14.4, 14.5, 14.6
+#
+# Role: the central Log_Aggregator that the Vector log shipper (vector.toml) pushes
+# into. This file configures the RETENTION, DELETION, and QUERY side of Requirement 14:
+#
+#   Req 14.3 — Keep every collected log for a CONFIGURABLE retention in the range
+#              [90 .. 2555] days (90 days .. 7 years), DEFAULT 365 days, and keep it
+#              queryable for the whole period.
+#              => limits_config.retention_period, driven by ${LOKI_RETENTION_PERIOD}
+#                 (default 365d). Clamp the value to the allowed range before setting it
+#                 (see README "Configuring retention").
+#
+#   Req 14.4 — When a log entry's retention expires, remove it within 24h of expiry.
+#              => the compactor runs retention with a delete delay far below 24h
+#                 (retention_delete_delay = 2h) and a frequent compaction cycle, so an
+#                 expired entry is physically removed well inside the 24-hour budget.
+#
+#   Req 14.5 — A query by time-range + `traceId` returns all matching entries within 30s.
+#              => `traceId` is carried in the log line (the shipper guarantees the field
+#                 always exists) and filtered with LogQL `| json | traceId="..."`; the
+#                 per-query deadline is capped at 30s (querier.query_timeout = 30s and
+#                 limits_config.query_timeout = 30s) and split_queries_by_interval keeps
+#                 range scans parallel/fast.
+#
+#   Req 14.6 — A query that matches no entry returns an EMPTY result set, not an error.
+#              => LogQL naturally returns an empty stream for a non-matching selector;
+#                 no extra config is required. This is asserted by task 18.3's test.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  # Cap how long the HTTP server will wait on a single query. Kept at 30s so a
+  # range + traceId query that runs long is bounded by the Req 14.5 budget.
+  http_server_read_timeout: 30s
+  http_server_write_timeout: 30s
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUERY (Req 14.5, 14.6)
+# ─────────────────────────────────────────────────────────────────────────────
+querier:
+  # Hard per-query deadline. A time-range + traceId query must come back within
+  # 30s (Req 14.5); queries exceeding this are cut off rather than running forever.
+  query_timeout: 30s
+  # Allow the full configured retention window to be queried (Req 14.3: queryable
+  # for the whole retention period). 2555 days is the max allowed retention.
+  max_concurrent: 8
+
+query_range:
+  # Split long range queries into sub-queries that run in parallel and cache,
+  # so even a wide time-range + traceId scan stays inside the 30s budget.
+  align_queries_with_step: true
+  cache_results: true
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEMA — TSDB with daily index periods (required for compactor-based retention)
+# ─────────────────────────────────────────────────────────────────────────────
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  filesystem:
+    directory: /loki/chunks
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RETENTION + DELETION (Req 14.3, 14.4)
+# ─────────────────────────────────────────────────────────────────────────────
+# The compactor is what actually enforces retention and deletes expired data.
+compactor:
+  working_directory: /loki/compactor
+  # Run a compaction/retention cycle every 10 minutes so expiry is acted on
+  # promptly (supports the 24h deletion budget of Req 14.4).
+  compaction_interval: 10m
+  # Turn on retention-based deletion in the compactor.
+  retention_enabled: true
+  # Delay between an entry becoming expired and its chunk being deleted.
+  # Kept at 2h — far below the 24h ceiling of Req 14.4 — so deletion always
+  # completes well within 24 hours of expiry.
+  retention_delete_delay: 2h
+  # Parallelism for the delete workers that physically remove expired chunks.
+  retention_delete_worker_count: 150
+  delete_request_store: filesystem
+
+limits_config:
+  # ── Req 14.3: configurable retention, default 365 days, range [90d .. 2555d] ──
+  # Set LOKI_RETENTION_PERIOD to any value in [90d .. 2555d]; defaults to 365d.
+  # Clamp out-of-range values to the nearest bound BEFORE deploying (see README).
+  retention_period: ${LOKI_RETENTION_PERIOD:-365d}
+
+  # ── Req 14.5: bound every query to 30s ──
+  query_timeout: 30s
+  # Allow querying across the entire retention window (up to the 7-year max) so a
+  # log stays queryable for its whole retention period (Req 14.3).
+  max_query_lookback: 0s
+  max_query_length: 0s
+  # Split range queries by day to parallelise wide time-range + traceId scans.
+  split_queries_by_interval: 24h
+
+  # Keep label cardinality sane: traceId is matched from the log body via
+  # `| json | traceId="..."`, NOT promoted to an index label.
+  max_query_series: 5000
+
+# Per-tenant / global retention overrides can be added here if a longer or shorter
+# window is required for a specific stream; the global retention_period above is
+# the default applied to all collected logs.

@@ -1,0 +1,51 @@
+# Prometheus alert rules — production-launch-readiness (Requirements 13.3, 13.4, 13.5)
+# Component: design.md region (ي-13)
+#
+# Rules:
+#   - APIEndpointUnreachable: Metrics_Endpoint unreachable (up == 0) for > 60s   (13.3)
+#   - APIHighErrorRate:       request error rate > 5% over a 5m window           (13.4)
+# The `for:` durations make alerts fire only after the condition has persisted,
+# and Alertmanager emits a `resolved` notification (send_resolved: true) once the
+# condition has cleared — i.e. after recovery of >= 60s given the `for` window.  (13.5)
+
+groups:
+  - name: alsaqi-api-availability
+    rules:
+      # ─── 13.3: endpoint unreachable > 60s ───────────────────────────────────
+      - alert: APIEndpointUnreachable
+        expr: up{job="alsaqi-api"} == 0
+        for: 60s
+        labels:
+          severity: critical
+          component: API_Container
+        annotations:
+          summary: "Metrics_Endpoint unreachable for the API service"
+          description: >-
+            Prometheus has failed to scrape the API metrics endpoint
+            (up == 0) for more than 60 seconds. The API_Container may be
+            down or unreachable on the internal network.
+
+  - name: alsaqi-api-errors
+    rules:
+      # ─── 13.4: error rate > 5% over a 5-minute window ───────────────────────
+      # Error ratio = 5xx/unhandled-exception errors over total HTTP requests.
+      # Numerator uses the dedicated error counter (alsaqi_http_errors_total);
+      # denominator uses the request-duration histogram count, which records one
+      # observation per processed HTTP request.
+      - alert: APIHighErrorRate
+        expr: >-
+          (
+            sum(rate(alsaqi_http_errors_total{job="alsaqi-api"}[5m]))
+            /
+            clamp_min(sum(rate(alsaqi_http_request_duration_seconds_count{job="alsaqi-api"}[5m])), 1)
+          ) > 0.05
+        for: 60s
+        labels:
+          severity: warning
+          component: API_Container
+        annotations:
+          summary: "API error rate above 5% over the last 5 minutes"
+          description: >-
+            The ratio of HTTP errors (5xx / unhandled exceptions) to total
+            requests has exceeded 5% over a 5-minute window. A resolved
+            notification will follow once the rate recovers below the threshold.

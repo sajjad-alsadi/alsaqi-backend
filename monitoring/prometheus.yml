@@ -1,0 +1,53 @@
+# Prometheus configuration — production-launch-readiness (Requirement 13.1)
+# Component: design.md region (ي-13) — Observability_Stack scrapes Metrics_Endpoint
+#
+# The API exposes a Prometheus-compatible endpoint at /metrics on port 3000
+# (see src/index.ts → app.get('/metrics', ...) and src/monitoring/metricsServer.ts).
+# Access control: when METRICS_TOKEN is configured the endpoint requires a
+# matching `Authorization: Bearer <token>` header; otherwise it is restricted to
+# loopback. For a containerized scrape over the internal compose network, set
+# METRICS_TOKEN and provide it below via the `authorization` block.
+
+global:
+  # Requirement 13.1: scrape Metrics_Endpoint every 15s with a 10s timeout.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: alsaqi-production
+
+# Alert rules evaluated by this Prometheus instance (Requirement 13.3–13.5).
+rule_files:
+  - /etc/prometheus/alert.rules.yml
+
+# Route firing/resolved alerts to Alertmanager (Requirement 13.3–13.5).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # ─── API metrics endpoint ──────────────────────────────────────────────────
+  # Target the `api` service on the internal compose network (alsaqi-network).
+  - job_name: alsaqi-api
+    metrics_path: /metrics
+    scheme: http
+    # If METRICS_TOKEN is configured on the API, supply it here so the scrape
+    # passes the `Authorization: Bearer <token>` access-control check.
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/metrics_token
+    static_configs:
+      - targets:
+          - api:3000
+        labels:
+          service: alsaqi-api
+          component: API_Container
+
+  # ─── Prometheus self-monitoring ─────────────────────────────────────────────
+  - job_name: prometheus
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - localhost:9090

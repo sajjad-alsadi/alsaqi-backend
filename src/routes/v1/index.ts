@@ -131,16 +131,31 @@ export function createV1Router(deps: V1RouterDeps): express.Router {
   // Health Check (enhanced - checks all subsystems)
   v1Router.use('/', createHealthRouter());
 
-  // OpenAPI Specification
-  v1Router.get('/docs', (req, res) => {
-    try {
-      const specPath = path.resolve(__dirname, '../../../../docs/openapi.yaml');
-      const spec = fs.readFileSync(specPath, 'utf-8');
-      res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-      res.send(spec);
-    } catch {
-      res.status(404).json({ error: 'OpenAPI specification not found' });
+  // OpenAPI Specification (Docs_Endpoint)
+  // Serves docs/openapi.yaml with HTTP 200 and a parseable YAML body. The file
+  // location differs between the source layout (src/routes/v1 → ../../../docs)
+  // and the bundled build (dist → ../docs), and the process may be launched from
+  // the package root, so we probe an ordered list of candidate paths and use the
+  // first that exists. This guarantees the endpoint resolves the spec regardless
+  // of runtime layout instead of returning a 404.
+  const docsCandidatePaths = [
+    path.resolve(__dirname, '../../../docs/openapi.yaml'), // source: src/routes/v1 → <pkg>/docs
+    path.resolve(__dirname, '../../docs/openapi.yaml'), // source: src/routes → <pkg>/docs
+    path.resolve(__dirname, '../docs/openapi.yaml'), // bundled: dist → <pkg>/docs
+    path.resolve(process.cwd(), 'docs/openapi.yaml'), // launched from package root
+  ];
+  v1Router.get('/docs', (_req, res) => {
+    for (const specPath of docsCandidatePaths) {
+      try {
+        const spec = fs.readFileSync(specPath, 'utf-8');
+        res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+        res.status(200).send(spec);
+        return;
+      } catch {
+        // Try the next candidate path.
+      }
     }
+    res.status(404).json({ error: 'OpenAPI specification not found' });
   });
 
   // Auth Routes

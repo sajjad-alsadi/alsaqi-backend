@@ -147,25 +147,40 @@ describe('Network Isolation - docker-compose.yml', () => {
     });
   });
 
-  describe('Only API service exposes port 3000 to the host', () => {
-    it('api service exposes port 3000', () => {
+  describe('Reverse_Proxy is the only public entrypoint (production-launch-readiness Req 4.2/4.5)', () => {
+    // NOTE: production-launch-readiness Requirement 4.5 places the API behind a
+    // TLS-terminating reverse proxy. The api application port (3000) is NO LONGER
+    // published to the host — it is reachable only on the internal alsaqi-network
+    // via `expose`, and the reverse-proxy is the sole service publishing host
+    // ports (80/443). This supersedes the earlier audit-era assumption that the
+    // api service published 3000:3000 directly.
+    it('api service does NOT publish a host port mapping (uses expose instead)', () => {
       const apiSection = extractServiceSection(composeContent, 'api');
+      expect(apiSection).not.toBe('');
 
-      // The api service should map port 3000
-      expect(apiSection).toMatch(/ports:/);
-      expect(apiSection).toMatch(/["']?3000:3000["']?/);
+      // The api service must not publish port 3000 to the host.
+      expect(apiSection).not.toMatch(/^\s+ports:/m);
+      expect(apiSection).not.toMatch(/["']?\d+:3000["']?/);
+      // It should instead expose 3000 only on the internal network.
+      expect(apiSection).toMatch(/^\s+expose:/m);
+      expect(apiSection).toMatch(/["']?3000["']?/);
     });
 
-    it('only the api service has a ports directive in production compose', () => {
-      // Get all services that have a ports directive
-      const services = ['api', 'postgres', 'redis'];
-      const servicesWithPorts = services.filter((svc) => {
+    it('reverse-proxy is the only internal service that publishes host ports', () => {
+      // Among the application/data services, none of api/postgres/redis may
+      // publish host ports; only the reverse-proxy (the public entrypoint) does.
+      const internalServices = ['api', 'postgres', 'redis'];
+      const internalWithPorts = internalServices.filter((svc) => {
         const section = extractServiceSection(composeContent, svc);
         return section.match(/^\s+ports:/m) !== null;
       });
+      expect(internalWithPorts).toEqual([]);
 
-      // Only the api service should have ports
-      expect(servicesWithPorts).toEqual(['api']);
+      // The reverse-proxy publishes the public TLS ports (80/443).
+      const proxySection = extractServiceSection(composeContent, 'reverse-proxy');
+      expect(proxySection).not.toBe('');
+      expect(proxySection).toMatch(/^\s+ports:/m);
+      expect(proxySection).toMatch(/["']?443:443["']?/);
     });
   });
 
