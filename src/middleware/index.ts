@@ -18,7 +18,6 @@ export { createHelmetMiddleware } from './helmet.js';
 export { globalErrorHandler, sanitizeErrorMessage, sanitizeErrorForClient, CLIENT_ERROR_FIELD_ALLOWLIST } from './error.js';
 export { notFoundHandler } from './notFoundHandler.js';
 export {
-  apiVersionHeader,
   unsupportedVersionHandler,
   versionFallbackRewrite,
   CURRENT_API_VERSION,

@@ -3,6 +3,7 @@ import { createLoginRoutes } from './login';
 import { createSessionRoutes } from './session';
 import { createPasswordRoutes } from './password';
 import { createTwoFactorRoutes } from './twoFactor';
+import { createRegisterRoutes } from './register';
 
 export const createAuthRoutes = (
   db: any,
@@ -23,6 +24,7 @@ export const createAuthRoutes = (
   router.use(createSessionRoutes(db, JWT_PUBLIC_KEY, JWT_PRIVATE_KEY, authenticate, logError));
   router.use(createPasswordRoutes(db, JWT_PUBLIC_KEY, JWT_PRIVATE_KEY, authLimiter, authenticate, checkPermission, createNotification, logError));
   router.use(createTwoFactorRoutes(db, JWT_PUBLIC_KEY, JWT_PRIVATE_KEY, authLimiter, authenticate, logError));
+  router.use(createRegisterRoutes(db, authenticate, checkPermission, logError));
 
   return router;
 };

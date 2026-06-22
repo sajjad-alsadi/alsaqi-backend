@@ -38,7 +38,7 @@ vi.mock('../../utils/n8nService', () => ({
 }));
 
 import { UserService } from '../UserService';
-import { NotFoundError } from '../../utils/errors';
+import { NotFoundError, ConflictError } from '../../utils/errors';
 
 describe('UserService', () => {
   let mockGet: ReturnType<typeof vi.fn>;
@@ -82,7 +82,8 @@ describe('UserService', () => {
 
     it('hashes the password before storing', async () => {
       mockGet
-        .mockResolvedValueOnce(null) // no existing user
+        .mockResolvedValueOnce(null) // no existing username
+        .mockResolvedValueOnce(null) // no existing email
         .mockResolvedValueOnce({ id: 'role-1' }) // role lookup
         .mockResolvedValueOnce({ entity_code: 'IT' }) // dept lookup
         .mockResolvedValueOnce({ id: 'user-new-id' }); // INSERT ... RETURNING id (portable read)
@@ -118,7 +119,8 @@ describe('UserService', () => {
 
     it('returns created user without password field', async () => {
       mockGet
-        .mockResolvedValueOnce(null) // no existing user
+        .mockResolvedValueOnce(null) // no existing username
+        .mockResolvedValueOnce(null) // no existing email
         .mockResolvedValueOnce({ id: 'role-1' }) // role lookup
         .mockResolvedValueOnce({ entity_code: 'ENG' }) // dept lookup
         .mockResolvedValueOnce({ id: 'user-new-id' }); // INSERT ... RETURNING id (portable read)
@@ -144,7 +146,8 @@ describe('UserService', () => {
 
     it('assigns role_id based on role name', async () => {
       mockGet
-        .mockResolvedValueOnce(null) // no existing user
+        .mockResolvedValueOnce(null) // no existing username
+        .mockResolvedValueOnce(null) // no existing email
         .mockResolvedValueOnce({ id: 'role-uuid-abc' }) // role lookup returns id
         .mockResolvedValueOnce(null) // dept lookup fails
         .mockResolvedValueOnce({ id: 'user-id' }); // INSERT ... RETURNING id (portable read)
@@ -162,6 +165,31 @@ describe('UserService', () => {
       const insertCall = mockGet.mock.calls.find((c: any[]) => c.length >= 13);
       expect(insertCall).toBeDefined();
       expect(insertCall![12]).toBe('role-uuid-abc');
+    });
+
+    // ─── duplicate conflict detection (Req 8.6) ──────────────────────────────
+    // The single creation path raises an explicit, field-identifying ConflictError so
+    // both POST /users and POST /auth/register surface the same conflict (Req 8.5/8.6).
+
+    it('throws a ConflictError identifying the username when the username already exists', async () => {
+      mockGet
+        .mockResolvedValueOnce({ id: 'existing-user' }) // (first invocation) username taken
+        .mockResolvedValueOnce({ id: 'existing-user' }); // (second invocation) username taken
+
+      await expect(UserService.createUser(userData)).rejects.toBeInstanceOf(ConflictError);
+      await expect(UserService.createUser(userData)).rejects.toThrow(/username/i);
+    });
+
+    it('throws a ConflictError identifying the email when the email already exists', async () => {
+      // username is free, but the email is already used by another account.
+      mockGet
+        .mockResolvedValueOnce(null) // no existing username
+        .mockResolvedValueOnce({ id: 'existing-email-user' }) // email already taken
+        .mockResolvedValueOnce(null) // (second invocation) no existing username
+        .mockResolvedValueOnce({ id: 'existing-email-user' }); // (second invocation) email taken
+
+      await expect(UserService.createUser(userData)).rejects.toBeInstanceOf(ConflictError);
+      await expect(UserService.createUser(userData)).rejects.toThrow(/email/i);
     });
   });
 

@@ -7,25 +7,18 @@
  * - Requests to /api/v1/{resource} pass through unchanged
  * - Requests to unsupported versions (/api/v2/, etc.) return 404
  *
- * Also sets the X-API-Version response header on all /api/ responses.
+ * The X-API-Version response header is NOT set here; it is set from a single
+ * source of truth (VERSION_SOURCE in src/utils/apiVersionSource.ts) by the
+ * early version-header middleware in src/index.ts.
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import { API_VERSION } from '@alsaqi/shared';
 
 /**
  * Current supported API version (major component only for routing).
  */
 export const CURRENT_API_VERSION = { major: 1, minor: 0 };
 export const SUPPORTED_VERSIONS = [1];
-
-/**
- * Middleware that adds the X-API-Version header to all /api/ responses.
- */
-export function apiVersionHeader(req: Request, res: Response, next: NextFunction): void {
-  res.setHeader('X-API-Version', `${CURRENT_API_VERSION.major}.${CURRENT_API_VERSION.minor}`);
-  next();
-}
 
 /**
  * Middleware that intercepts requests to unsupported API versions.

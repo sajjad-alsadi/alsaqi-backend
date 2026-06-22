@@ -28,6 +28,22 @@ export interface CreateNotificationOptions {
   title?: string;
 }
 
+/**
+ * Normalizes the affected-row count from a database write result across the
+ * primary and fallback paths. The `db` wrapper's `run()` returns a `RunResult`
+ * whose `changes` field already folds the underlying driver's `rowCount`
+ * (pg) and `affectedRows` (PGlite). This helper reads that count defensively,
+ * also tolerating a raw driver result shape, and never returns a negative or
+ * non-finite value.
+ */
+function affectedCount(result: unknown): number {
+  if (!result || typeof result !== 'object') return 0;
+  const r = result as { changes?: unknown; rowCount?: unknown; affectedRows?: unknown };
+  const raw = r.changes ?? r.rowCount ?? r.affectedRows ?? 0;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export interface NotificationFeedItem {
   id: string;
   recipient_row_id: string;
@@ -140,20 +156,51 @@ export class NotificationService {
   }
 
   /**
-   * Mark all notifications as read for a specific user.
+   * Mark a set of notifications as read for a specific user, returning the
+   * number of notifications that actually transitioned to read.
+   *
+   * Scoped to `recipient_id = userId` so a caller can never mark another
+   * user's notifications, and to `is_read = false` so the returned count
+   * reflects only notifications that genuinely changed state (not ones that
+   * were already read). Uses the two-table architecture with a legacy
+   * single-table fallback, mirroring the other read/dismiss methods.
    */
-  static async markAllRead(userId: string | number) {
+  static async markManyRead(
+    notificationIds: Array<string | number>,
+    userId: string | number
+  ): Promise<number> {
+    if (!Array.isArray(notificationIds) || notificationIds.length === 0) return 0;
     try {
-      await db.prepare(
+      const result = await db.prepare(
+        "UPDATE notification_recipients SET is_read = true, read_at = CURRENT_TIMESTAMP WHERE recipient_id = ?::uuid AND is_read = false AND notification_id = ANY(?::uuid[])"
+      ).run(userId, notificationIds);
+      return affectedCount(result);
+    } catch {
+      // Fallback to legacy single-table
+      const result = await db.prepare(
+        "UPDATE notifications SET status = 'Read' WHERE user_id = ?::uuid AND status = 'Unread' AND id = ANY(?::uuid[])"
+      ).run(userId, notificationIds);
+      return affectedCount(result);
+    }
+  }
+
+  /**
+   * Mark all notifications as read for a specific user, returning the number
+   * of notifications that actually transitioned to read.
+   */
+  static async markAllRead(userId: string | number): Promise<number> {
+    try {
+      const result = await db.prepare(
         "UPDATE notification_recipients SET is_read = true, read_at = CURRENT_TIMESTAMP WHERE recipient_id = ?::uuid AND is_read = false"
       ).run(userId);
+      return affectedCount(result);
     } catch {
       // Fallback
-      await db.prepare(
+      const result = await db.prepare(
         "UPDATE notifications SET status = 'Read' WHERE user_id = ?::uuid AND status = 'Unread'"
       ).run(userId);
+      return affectedCount(result);
     }
-    return true;
   }
 
   /**

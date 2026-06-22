@@ -100,9 +100,19 @@ const dbUrlClassification: DbUrlClassification = classifyDatabaseUrl(DATABASE_UR
 let poolConfigError: PoolConfigError | null = null;
 
 export function getPersistentDataDir(): string {
-  // Always use /tmp to avoid filesystem permission issues in Cloud Run
+  // Default: use /tmp to avoid filesystem permission issues in Cloud Run
   // and to avoid dev server file-watcher crash loops.
-  let dataDir = path.resolve('/tmp', 'audit_db_persistent_v2');
+  //
+  // Override: when PGLITE_DATA_DIR is set to a non-empty value, use it instead.
+  // This is additive and unset in production, so production behavior is
+  // unchanged. It lets independent test suites point the embedded engine at a
+  // unique on-disk directory so parallel/co-running full-server suites do not
+  // contend for the same PGlite data dir (which reproducibly aborts the engine).
+  const override = process.env.PGLITE_DATA_DIR;
+  let dataDir =
+    override && override.trim().length > 0
+      ? path.resolve(override)
+      : path.resolve('/tmp', 'audit_db_persistent_v2');
   
   const ensureDir = (dir: string): boolean => {
     try {

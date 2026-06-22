@@ -6,7 +6,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
-import { API_VERSION } from '@alsaqi/shared';
+import { API_VERSION, ErrorCodes } from '@alsaqi/shared';
 import type { ResponseWrapperOptions } from './types.js';
 
 interface ResponseMeta {
@@ -113,7 +113,7 @@ export function createResponseWrapper(options: ResponseWrapperOptions = {}) {
         ? {
             success: false,
             data: body && typeof body === 'object' && 'data' in body ? body.data : null,
-            error: hasNestedErrorObject ? body.error : body,
+            error: normalizeErrorObject(hasNestedErrorObject ? body.error : body, statusCode),
             meta,
           }
         : {
@@ -145,6 +145,104 @@ function isAlreadyWrapped(body: any): boolean {
     body.meta !== null &&
     typeof body.meta === 'object'
   );
+}
+
+/**
+ * Maps an HTTP status code to a default, non-empty error code for responses
+ * whose body did not carry one. Mirrors the categories used by the global error
+ * handler and the shared ErrorCodes constants.
+ */
+function defaultErrorCodeForStatus(statusCode: number): string {
+  switch (statusCode) {
+    case 400:
+      return ErrorCodes.VALIDATION_ERROR;
+    case 401:
+      return ErrorCodes.UNAUTHORIZED;
+    case 403:
+      return ErrorCodes.FORBIDDEN;
+    case 404:
+      return ErrorCodes.NOT_FOUND;
+    case 409:
+      return (ErrorCodes as Record<string, string>).CONFLICT ?? 'CONFLICT';
+    case 429:
+      return ErrorCodes.RATE_LIMIT_EXCEEDED;
+    default:
+      return ErrorCodes.INTERNAL_ERROR;
+  }
+}
+
+/**
+ * Provides a default, non-empty error message for a status code when the body
+ * carried no usable message.
+ */
+function defaultErrorMessageForStatus(statusCode: number): string {
+  switch (statusCode) {
+    case 400:
+      return 'Bad request';
+    case 401:
+      return 'Unauthorized';
+    case 403:
+      return 'Forbidden';
+    case 404:
+      return 'Resource not found';
+    case 409:
+      return 'Conflict';
+    case 429:
+      return 'Too many requests';
+    default:
+      return 'An unexpected error occurred';
+  }
+}
+
+/**
+ * Normalizes an error payload into a canonical error object that always carries
+ * a non-empty `code` and `message`, so every error envelope satisfies the
+ * Error_Envelope invariant (success === false, error.code/message non-empty)
+ * regardless of how the producing middleware shaped its raw body.
+ *
+ * - A plain string payload becomes `{ code, message: <string> }`.
+ * - An object payload is preserved, but a missing/empty `code` or `message`
+ *   (e.g. the auth middleware's `{ error: 'Unauthorized' }`) is backfilled from
+ *   the status code, deriving the message from a top-level `error`/`message`
+ *   string when present.
+ *
+ * This is additive: existing well-formed error objects (with a non-empty code
+ * and message) pass through unchanged.
+ */
+function normalizeErrorObject(payload: any, statusCode: number): any {
+  if (typeof payload === 'string') {
+    return {
+      code: defaultErrorCodeForStatus(statusCode),
+      message: payload.length > 0 ? payload : defaultErrorMessageForStatus(statusCode),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return {
+      code: defaultErrorCodeForStatus(statusCode),
+      message: defaultErrorMessageForStatus(statusCode),
+    };
+  }
+
+  const result: Record<string, unknown> = { ...payload };
+
+  const hasCode = typeof result.code === 'string' && (result.code as string).length > 0;
+  if (!hasCode) {
+    result.code = defaultErrorCodeForStatus(statusCode);
+  }
+
+  const hasMessage = typeof result.message === 'string' && (result.message as string).length > 0;
+  if (!hasMessage) {
+    // Fall back to a top-level `error` string (e.g. `{ error: 'Unauthorized' }`)
+    // before using the status-derived default.
+    const fallback =
+      typeof result.error === 'string' && (result.error as string).length > 0
+        ? (result.error as string)
+        : defaultErrorMessageForStatus(statusCode);
+    result.message = fallback;
+  }
+
+  return result;
 }
 
 /**

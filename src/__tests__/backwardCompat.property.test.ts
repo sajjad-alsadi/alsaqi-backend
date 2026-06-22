@@ -6,9 +6,9 @@ import request from 'supertest';
 import {
   versionFallbackRewrite,
   unsupportedVersionHandler,
-  apiVersionHeader,
   SUPPORTED_VERSIONS,
 } from '../middleware/versionRewrite';
+import { VERSION_SOURCE } from '../utils/apiVersionSource';
 import { notFoundHandler } from '../middleware/notFoundHandler';
 
 /**
@@ -103,8 +103,15 @@ const unknownResourceArb = fc
 function createTestApp() {
   const app = express();
 
-  // X-API-Version header on all /api/ responses
-  app.use('/api/', apiVersionHeader);
+  // X-API-Version header on all /api/ responses, set from the single
+  // VERSION_SOURCE (mirrors the early inline middleware in src/index.ts step 0a)
+  // instead of the removed apiVersionHeader middleware.
+  app.use((req, res, next) => {
+    if (req.path === '/api' || req.path.startsWith('/api/')) {
+      res.setHeader('X-API-Version', VERSION_SOURCE);
+    }
+    next();
+  });
 
   // Unsupported version handler (must be before fallback rewrite)
   app.use('/api/', unsupportedVersionHandler);
@@ -323,12 +330,12 @@ describe('Property 5: Backward Compatibility', () => {
           // Test versioned path
           const res1 = await request(app).get(`/api/v1/${resource}`);
           expect(res1.headers['x-api-version']).toBeDefined();
-          expect(res1.headers['x-api-version']).toMatch(/^\d+\.\d+$/);
+          expect(res1.headers['x-api-version']).toBe(VERSION_SOURCE);
 
           // Test unversioned path (rewritten)
           const res2 = await request(app).get(`/api/${resource}`);
           expect(res2.headers['x-api-version']).toBeDefined();
-          expect(res2.headers['x-api-version']).toMatch(/^\d+\.\d+$/);
+          expect(res2.headers['x-api-version']).toBe(VERSION_SOURCE);
         }),
         { numRuns: 30 }
       );
@@ -404,7 +411,8 @@ describe('Property 5: Backward Compatibility', () => {
  * The FIX-BE-1..FIX-BE-5 cleanup/sync changes must NOT alter the runtime API
  * contract. For every pre-existing endpoint:
  *  - 7.1 a successful response carries `success: true` inside the envelope.
- *  - 7.2 every response (success or error) carries `X-API-Version: 1.0`.
+ *  - 7.2 every response (success or error) carries the single VERSION_SOURCE
+ *        value in `X-API-Version`.
  *  - 7.3 path, HTTP method, status code, and response shape are unchanged.
  *  - 7.4 an error response carries `success: false` inside the envelope.
  *
@@ -413,8 +421,8 @@ describe('Property 5: Backward Compatibility', () => {
  * POST /roles/:id/permissions route (FIX-BE-4).
  */
 describe('Requirement 7: API Contract Preservation (no regression)', () => {
-  describe('7.2: X-API-Version header is exactly "1.0" on every response', () => {
-    it('success responses carry X-API-Version: 1.0', async () => {
+  describe('7.2: X-API-Version header equals the single VERSION_SOURCE on every response', () => {
+    it('success responses carry X-API-Version: VERSION_SOURCE', async () => {
       await fc.assert(
         fc.asyncProperty(knownResourceArb, resourceIdArb, async (resource, idSuffix) => {
           const app = createTestApp();
@@ -422,14 +430,14 @@ describe('Requirement 7: API Contract Preservation (no regression)', () => {
           const versioned = await request(app).get(`/api/v1/${resource}${idSuffix}`);
           const unversioned = await request(app).get(`/api/${resource}${idSuffix}`);
 
-          expect(versioned.headers['x-api-version']).toBe('1.0');
-          expect(unversioned.headers['x-api-version']).toBe('1.0');
+          expect(versioned.headers['x-api-version']).toBe(VERSION_SOURCE);
+          expect(unversioned.headers['x-api-version']).toBe(VERSION_SOURCE);
         }),
         { numRuns: 100 }
       );
     });
 
-    it('error responses (unknown path, unsupported version) carry X-API-Version: 1.0', async () => {
+    it('error responses (unknown path, unsupported version) carry X-API-Version: VERSION_SOURCE', async () => {
       await fc.assert(
         fc.asyncProperty(
           unknownResourceArb,
@@ -441,8 +449,8 @@ describe('Requirement 7: API Contract Preservation (no regression)', () => {
             const notFound = await request(app).get(`/api/${unknownResource}`);
             const badVersion = await request(app).get(`/api/v${version}/${resource}`);
 
-            expect(notFound.headers['x-api-version']).toBe('1.0');
-            expect(badVersion.headers['x-api-version']).toBe('1.0');
+            expect(notFound.headers['x-api-version']).toBe(VERSION_SOURCE);
+            expect(badVersion.headers['x-api-version']).toBe(VERSION_SOURCE);
           }
         ),
         { numRuns: 50 }
@@ -524,7 +532,7 @@ describe('Requirement 7: API Contract Preservation (no regression)', () => {
           expect(res.status).not.toBe(501);
           expect(res.body.success).toBe(true);
           expect(res.body.data.resource).toBe('central-bank-instructions');
-          expect(res.headers['x-api-version']).toBe('1.0');
+          expect(res.headers['x-api-version']).toBe(VERSION_SOURCE);
         }),
         { numRuns: 30 }
       );
@@ -547,7 +555,7 @@ describe('Requirement 7: API Contract Preservation (no regression)', () => {
 
             expect(post.status).toBe(200);
             expect(post.body.success).toBe(true);
-            expect(post.headers['x-api-version']).toBe('1.0');
+            expect(post.headers['x-api-version']).toBe(VERSION_SOURCE);
 
             // GET (matrix read) is still available from the single owner.
             const get = await request(app).get(`/api/v1/roles/${roleId}/permissions`);
@@ -560,7 +568,7 @@ describe('Requirement 7: API Contract Preservation (no regression)', () => {
               .send({ permissions: [] });
             expect(put.status).toBe(404);
             expect(put.body.success).toBe(false);
-            expect(put.headers['x-api-version']).toBe('1.0');
+            expect(put.headers['x-api-version']).toBe(VERSION_SOURCE);
           }
         ),
         { numRuns: 50 }

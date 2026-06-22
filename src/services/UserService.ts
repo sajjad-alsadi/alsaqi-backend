@@ -135,9 +135,24 @@ export class UserService {
     let createdEmployeeId: string = '';
 
     const created = await db.transaction(async () => {
+      // Duplicate detection lives in the single creation path (UserService) so both
+      // POST /users and POST /auth/register surface the same explicit conflict error
+      // identifying the duplicate field (Req 8.6). The message names the field so the
+      // Error_Envelope produced by globalErrorHandler tells the client which input clashed.
       const existingUser = await db.prepare("SELECT id FROM users WHERE username = ?").get(username);
       if (existingUser) {
-        throw new ConflictError("Username already exists");
+        throw new ConflictError("A user with this username already exists");
+      }
+
+      // `email` carries no UNIQUE DB constraint (see database/schema.sql), so an explicit
+      // check is required here to reject a duplicate email and identify the field (Req 8.6).
+      // Only enforced when an email is provided, and matched case-insensitively since email
+      // addresses are case-insensitive in practice.
+      if (email) {
+        const existingEmail = await db.prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)").get(email);
+        if (existingEmail) {
+          throw new ConflictError("A user with this email already exists");
+        }
       }
 
       const hashedPassword = bcrypt.hashSync(password, 12);

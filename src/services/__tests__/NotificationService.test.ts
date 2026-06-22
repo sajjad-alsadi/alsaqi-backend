@@ -154,12 +154,16 @@ describe('NotificationService', () => {
   // ─── markAllRead ───────────────────────────────────────────────────────────
 
   describe('markAllRead', () => {
-    it('updates all unread notifications for the user', async () => {
+    it('updates all unread notifications for the user and returns the affected count as a number', async () => {
+      // Primary db result shape uses `changes` (RunResult), per the design.
       mockRun.mockResolvedValueOnce({ changes: 3 });
 
       const result = await NotificationService.markAllRead('user-1');
 
-      expect(result).toBe(true);
+      // markAllRead now returns the count of notifications transitioned to read
+      // (Requirement 9.4) rather than a boolean.
+      expect(typeof result).toBe('number');
+      expect(result).toBe(3);
       expect(mockPrepare).toHaveBeenCalledWith(
         expect.stringContaining('SET is_read = true, read_at = CURRENT_TIMESTAMP')
       );
@@ -167,6 +171,64 @@ describe('NotificationService', () => {
         expect.stringContaining('is_read = false')
       );
       expect(mockRun).toHaveBeenCalledWith('user-1');
+    });
+
+    // ─── affectedCount helper behavior (verified indirectly via markAllRead) ──
+    // The helper normalizes the affected-row count across driver result shapes:
+    // primary `changes` (RunResult), `rowCount` (pg), and fallback `affectedRows`
+    // (PGlite) — Requirement 9.6.
+
+    it('reads the count from the `rowCount` result shape', async () => {
+      mockRun.mockResolvedValueOnce({ rowCount: 5 });
+
+      const result = await NotificationService.markAllRead('user-1');
+
+      expect(result).toBe(5);
+    });
+
+    it('reads the count from the `affectedRows` result shape', async () => {
+      mockRun.mockResolvedValueOnce({ affectedRows: 7 });
+
+      const result = await NotificationService.markAllRead('user-1');
+
+      expect(result).toBe(7);
+    });
+
+    it('prefers `changes` over `rowCount`/`affectedRows` when multiple are present', async () => {
+      mockRun.mockResolvedValueOnce({ changes: 2, rowCount: 9, affectedRows: 4 });
+
+      const result = await NotificationService.markAllRead('user-1');
+
+      expect(result).toBe(2);
+    });
+
+    it('returns 0 when the db result has no recognizable count field', async () => {
+      mockRun.mockResolvedValueOnce({});
+
+      const result = await NotificationService.markAllRead('user-1');
+
+      expect(result).toBe(0);
+    });
+
+    it('returns 0 when the db result is null/undefined', async () => {
+      mockRun.mockResolvedValueOnce(undefined);
+
+      const result = await NotificationService.markAllRead('user-1');
+
+      expect(result).toBe(0);
+    });
+
+    it('returns the affected count via the legacy fallback path when the primary update fails', async () => {
+      // Primary (two-table) update throws → fallback to legacy single-table.
+      mockRun.mockRejectedValueOnce(new Error('table not found'));
+      mockRun.mockResolvedValueOnce({ changes: 4 });
+
+      const result = await NotificationService.markAllRead('user-1');
+
+      expect(result).toBe(4);
+      expect(mockPrepare).toHaveBeenLastCalledWith(
+        expect.stringContaining("SET status = 'Read'")
+      );
     });
   });
 

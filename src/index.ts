@@ -11,13 +11,11 @@ import http from 'http';
 import cookieParser from 'cookie-parser';
 import fileUpload from 'express-fileupload';
 import { WebSocketServer } from 'ws';
-import { API_VERSION } from '@alsaqi/shared';
 
 // Middleware
 import { createCorsMiddleware } from './middleware/cors.js';
 import { csrfMiddleware } from './middleware/csrf.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
-import { apiVersionMiddleware } from './middleware/apiVersion.js';
 import { createCorrelationIdMiddleware } from './middleware/correlationId.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 import { createResponseWrapper } from './middleware/responseWrapper.js';
@@ -26,12 +24,12 @@ import { createHelmetMiddleware } from './middleware/helmet.js';
 import { globalErrorHandler } from './middleware/error.js';
 import { bodySizeLimit } from './middleware/validate.js';
 import {
-  apiVersionHeader,
   unsupportedVersionHandler,
   versionFallbackRewrite,
   CURRENT_API_VERSION,
   SUPPORTED_VERSIONS,
 } from './middleware/versionRewrite.js';
+import { VERSION_SOURCE } from './utils/apiVersionSource.js';
 import { notFoundHandler } from './middleware/notFoundHandler.js';
 
 // Routes
@@ -153,14 +151,14 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   //     even on early-rejection responses (e.g. a 413 from bodySizeLimit or the
   //     file-upload abortOnLimit) that never reach the later version middleware.
   //     This guarantees that every /api response identifies the deployed system
-  //     version. The value is sourced from the API_VERSION env override when set,
-  //     otherwise the @alsaqi/shared API_VERSION constant (which tracks the
-  //     package.json version of the deployed system).
-  //     Requirements: 11.7
-  const deployedApiVersion = process.env.API_VERSION?.trim() || API_VERSION;
+  //     version. The value is the single VERSION_SOURCE constant
+  //     (src/utils/apiVersionSource.ts), which equals the @alsaqi/shared
+  //     API_VERSION constant unless the API_VERSION env override is set, so it is
+  //     the one and only writer of X-API-Version.
+  //     Requirements: 3.1, 3.2, 3.5, 3.6, 3.7
   app.use((req, res, next) => {
     if (req.path === '/api' || req.path.startsWith('/api/')) {
-      res.setHeader('X-API-Version', deployedApiVersion);
+      res.setHeader('X-API-Version', VERSION_SOURCE);
     }
     next();
   });
@@ -216,9 +214,7 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   //     response (Finding 1.16 → 2.16).
   app.use(requestLoggerMiddleware);
 
-  // 7. X-API-Version header on all /api/ responses
-  app.use('/api/', apiVersionHeader);
-  app.use(apiVersionMiddleware);
+  // 7. X-API-Version header is set once from VERSION_SOURCE in step 0a above.
 
   // 8. Response wrapper (wraps all JSON responses in ApiResponse envelope)
   app.use(createResponseWrapper());
@@ -231,16 +227,14 @@ export function createApiServer(config: ApiServerConfig): ApiServer {
   }));
 
   // 10. CSRF validation on state-changing requests (POST, PUT, PATCH, DELETE)
-  //     Exempt endpoints: login, refresh token, register
+  //     Exempt endpoints: login, refresh token, forgot-password
   app.use('/api', csrfMiddleware({
     exemptPaths: [
       '/api/auth/login',
       '/api/auth/refresh',
-      '/api/auth/register',
       '/api/auth/forgot-password',
       '/api/v1/auth/login',
       '/api/v1/auth/refresh',
-      '/api/v1/auth/register',
       '/api/v1/auth/forgot-password',
       '/api/metrics/web-vitals',
       '/api/v1/metrics/web-vitals',
